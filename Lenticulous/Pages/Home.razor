@@ -140,6 +140,16 @@
         {
             <pre>@_probeText</pre>
         }
+        <button @onclick="CalibrateAsync" disabled="@_busy">Calibrate (9 white patches)</button>
+        <button @onclick="LocateSubPixelsAsync" disabled="@_busy">Locate R, G, B sub-pixels of this pixel</button>
+        @if (_calibText != "")
+        {
+            <pre>@_calibText</pre>
+        }
+        @if (_locateText != "")
+        {
+            <pre>@_locateText</pre>
+        }
         @if (_stimulusStatus == null)
         {
             <p class="muted">No stimulus window reporting yet.</p>
@@ -351,6 +361,96 @@
         lines.Add($"strongest peak over noise: {report.SignalToNoise:0.0}");
         _probeText = string.Join("\n", lines);
     }
+
+    // CALIBRATION: where on the camera picture does a stimulus pixel show up? Nine white patches on a grid, each located in the picture
+    // by its centre of light, then a projective fit stimulus -> camera.
+    Homography? _calib;
+    string _calibText = "";
+    Task CalibrateAsync() => RunRobotAsync(async () =>
+    {
+        _calibText = "calibrating: darkening...";
+        StateHasChanged();
+        Stimulus("info 0");
+        Stimulus("clear");
+        await Task.Delay(1500);
+        var dark = await Robot.CaptureAveragedAsync(12, 40);
+        if (dark == null) { _calibText = "no video yet: press Connect video first"; return; }
+        var (w, h) = Robot.ProbeSize;
+        var from = new List<(double X, double Y)>();
+        var to = new List<(double X, double Y)>();
+        var peaks = new List<FrameDifference.Blob>();
+        var lines = new List<string>();
+        foreach (var y in new[] { 150, 436, 722 })
+            foreach (var x in new[] { 200, 832, 1460 })
+            {
+                Stimulus("clear");
+                Stimulus($"rect {x - 12} {y - 12} 24 24 255 255 255");
+                await Task.Delay(800);
+                var lit = await Robot.CaptureAveragedAsync(8, 40);
+                var blob = FrameDifference.BlobCentroid(dark, lit!, w, h);
+                if (blob == null) { lines.Add($"stimulus ({x},{y}): not seen"); continue; }
+                from.Add((x, y));
+                to.Add((blob.Value.X, blob.Value.Y));
+                peaks.Add(blob.Value);
+                lines.Add($"stimulus ({x},{y}) -> camera ({blob.Value.X:0.0},{blob.Value.Y:0.0})  +{blob.Value.Peak:0} size {blob.Value.Width}x{blob.Value.Height}");
+                _calibText = string.Join("\n", lines);
+                StateHasChanged();
+            }
+        Stimulus("clear");
+        // A patch that is off the camera's picture (or hidden) leaves only noise: its "blob" is small and weak. Keep the real ones,
+        // those at least half as strong as the strongest and of sensible size.
+        if (peaks.Count > 0)
+        {
+            var strongest = peaks.Max(p => p.Peak);
+            for (int i = peaks.Count - 1; i >= 0; i--)
+                if (peaks[i].Peak < strongest * 0.5 || peaks[i].Pixels < 100)
+                {
+                    lines.Add($"ignored stimulus ({from[i].X:0},{from[i].Y:0}): too weak or too small to be the patch");
+                    from.RemoveAt(i); to.RemoveAt(i); peaks.RemoveAt(i);
+                }
+        }
+        if (from.Count < 4) { lines.Add($"only {from.Count} patches seen: cannot fit"); _calibText = string.Join("\n", lines); return; }
+        _calib = Homography.Fit(from, to);
+        var (ax, ay) = _calib.Map(832, 436);
+        var (bx, by) = _calib.Map(833, 437);
+        lines.Add($"fit from {from.Count} patches, RMS residual {_calib.RmsError(from, to):0.00} camera px; one stimulus pixel = {bx - ax:0.00} x {by - ay:0.00} camera px at the centre");
+        _calibText = string.Join("\n", lines);
+    });
+
+    // Where does a lit sub-pixel show up, and does it stand out? Each colour channel of the pixel is lit in turn; the predicted
+    // camera position is searched, and the same place is searched in a dark-versus-dark control taken at the same moment.
+    string _locateText = "";
+    Task LocateSubPixelsAsync() => RunRobotAsync(async () =>
+    {
+        if (_calib == null) { _locateText = "calibrate first"; return; }
+        _locateText = "locating: darkening...";
+        StateHasChanged();
+        Stimulus("info 0");
+        Stimulus("clear");
+        await Task.Delay(1500);
+        var dark1 = await Robot.CaptureAveragedAsync(12, 40);
+        if (dark1 == null) { _locateText = "no video yet"; return; }
+        var dark2 = await Robot.CaptureAveragedAsync(12, 40);
+        var (w, h) = Robot.ProbeSize;
+        var lines = new List<string>();
+        var names = new[] { "R", "G", "B" };
+        for (int c = 0; c < 3; c++)
+        {
+            var (cx, cy) = _calib.Map(_subX + (c + 0.5) / 3.0, _subY + 0.5);
+            var rgb = c == 0 ? "255 0 0" : c == 1 ? "0 255 0" : "0 0 255";
+            Stimulus($"px {_subX} {_subY} {rgb}");
+            await Task.Delay(900);
+            var lit = await Robot.CaptureAveragedAsync(12, 40);
+            Stimulus("clear");
+            var real = FrameDifference.AnalyzeRegion(dark1, lit!, w, h, 3, cx, cy, 6);
+            var control = FrameDifference.AnalyzeRegion(dark1, dark2!, w, h, 3, cx, cy, 6);
+            lines.Add($"{names[c]} sub-pixel at ({_subX},{_subY}) predicted camera ({cx:0.0},{cy:0.0}):");
+            lines.Add($"   lit      peak +{real.RoiPeak.Value:0.0} in {names[real.RoiPeak.Channel]} at ({real.RoiPeak.X},{real.RoiPeak.Y}); {real.WindowsAtLeastAsBright} of {real.WindowsTotal} other windows as bright; sums R/G/B {real.ChannelSum[0]:0}/{real.ChannelSum[1]:0}/{real.ChannelSum[2]:0}; noise {real.NoiseStd:0.00}");
+            lines.Add($"   control  peak +{control.RoiPeak.Value:0.0} in {names[control.RoiPeak.Channel]} at ({control.RoiPeak.X},{control.RoiPeak.Y}); {control.WindowsAtLeastAsBright} of {control.WindowsTotal} other windows as bright; sums R/G/B {control.ChannelSum[0]:0}/{control.ChannelSum[1]:0}/{control.ChannelSum[2]:0}");
+            _locateText = string.Join("\n", lines);
+            StateHasChanged();
+        }
+    });
 
     /// <summary>
     /// Black screen, then exactly one colour channel of one pixel at full brightness: one sub-pixel lit, every neighbour off. The

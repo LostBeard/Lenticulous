@@ -241,3 +241,23 @@ NOT yet validated on real hardware: the simulation assumes a Gaussian view respo
 - Does Chrome on Windows decode QR with `BarcodeDetector`, or do we decode ourselves?
 - Dev loop: the Reachy path only runs on a Space. Algorithm work uses a plain camera source meanwhile.
 - The JavaScript-era builds TJ remembers: not found anywhere searched (Projects and other drives, 2026-10-15). Not needed.
+
+## Measured: one lit sub-pixel against the Reachy camera (2026-10-15)
+
+Philips 22-3D2N11/00, camera about 20 cm away. A 9-patch calibration (white 24x24 patches located by centre of light, projective fit)
+predicts where a stimulus pixel lands in the camera picture to 0.21 camera px RMS; one stimulus pixel is about 1.0 camera px. The
+right third of the screen is outside the picture at this pose.
+
+At stimulus pixel (832,436), predicted camera (833,292), each colour channel lit alone (12 frames averaged, dark frames taken in the
+same minute):
+
+| sub-pixel | peak over dark | other windows as bright | channel sum | dark-vs-dark control sum |
+|---|---|---|---|---|
+| R | +19.8 | 1 of 5386 | 1732 | 120 |
+| G | +96.9 | 0 of 5386 | 5308 | 25 |
+| B | +144.5 | 0 of 5386 | 12352 | 138 |
+
+Noise sigma 1.48. The three sub-pixels differ in brightness because the camera sits at one place in the view fan: that
+per-sub-pixel intensity is the signal the scan needs. Red is the weakest (+19.8, 13 sigma); it still ranks first or second in the
+frame, so detection is by rank at the predicted position, not by a frame-wide threshold (the camera has structured noise, so a
+frame-wide maximum is not trustworthy).
