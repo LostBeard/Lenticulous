@@ -194,11 +194,17 @@ code never decoded. Fixed in the library (tests in `BackendTestBase.QRTests.cs`)
 Clean decode: 2400/2400 (lengths 1-150, all levels, 2 module sizes, 2 alphabets); before: 36-59 of 150 per level.
 Pushed to SpawnDev.ILGPU master (7eae1c1), local package `SpawnDev.ILGPU 5.3.8-local.1` in the local feed (never nuget.org);
 this app uses it. Five new tests, red on all 7 backends against the old decoder (35 of 51), 51 of 51 green with the fix.
-STILL OPEN (named, not fixed): the decoder fails on ANY rotation (3 degrees: top-left finder missed; 10 degrees: none) and
-has no perspective correction (affine sampling from 3 finder centres, no alignment pattern); robust to blur, 3 px modules,
-dark frames and brightness gradients. The robot's camera sees the code with roll under 1 degree, which is why it reads, but
-an oblique view will not. Plan: ZXing-style finder cross-check (vertical, horizontal, diagonal) and homography sampling
-using the alignment pattern. Also: no overload that takes a JS typed array or GPU buffer (Rule 4).
+4. (local.2, 67d8a82) Rotation and perspective: the row-scan locator failed on ANY rotation (3 degrees missed a finder, 10 found
+   none) and sampling was affine. New `QR/QRLocator.cs`: finders cross-checked along three directions, module size measured along
+   each leg, modules sampled through a homography anchored on the alignment pattern (plain parallelogram tried first), and the
+   binariser's flat-block cut-off follows the image noise. Measured: rotation 3-270 degrees 40/40 (was 0/40), yaw tilt to 55
+   degrees v2 and v5 40/40, pitch 40 40/40, camera-like 6.5 px modules + yaw 30 + roll 8 + blur 40/40, with noise sigma 20 38/40
+   (was 6/40); never wrong text. Tests `QR_Decode_ReadsRotatedCodes`, `_ReadsPerspectiveViews`, `_ReadsCameraLikeViews`: red on all
+   7 backends against the previous decoder, 72/72 green. Package `SpawnDev.ILGPU 5.3.8-local.2` (local feed only).
+STILL OPEN (named, not fixed): version 1 has no alignment pattern, so strong perspective on a v1 code does not read (the ID code
+is version 2 on purpose); tilts of 65 degrees yaw / 60 pitch do not read; blur plus heavy noise can still fail; no overload that
+takes a JS typed array or GPU buffer and the finder search is CPU (Rule 4). NOT yet re-checked on the real camera after local.2
+(the robot was in use for a Vertex test).
 
 ## Open questions
 
