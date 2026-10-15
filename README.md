@@ -44,7 +44,7 @@ dotnet publish Lenticulous/Lenticulous.csproj -c Release -o publish
 
 Serve `publish/wwwroot` from any static server with a fallback to `index.html`, and open it on `http://localhost`
 (the robot link needs a secure context that is allowed plain `ws://`). The app references a **local** build of
-`SpawnDev.ILGPU` (`5.3.8-local.1`, QR decoder fixes) and `SpawnDev.Reachy` from a local package feed; neither is on
+`SpawnDev.ILGPU` (`5.3.8-local.2`, QR decoder fixes) and `SpawnDev.Reachy` from a local package feed; neither is on
 nuget.org yet, so a fresh checkout will not restore until they are released.
 
 ## License

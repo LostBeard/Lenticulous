@@ -17,7 +17,7 @@
 		<PackageReference Include="SpawnDev.SpawnJS.Blazor" Version="3.0.4" />
 		<!-- QR encoder/decoder (CPU path only here: the matrix is drawn as an SVG, frames are decoded on the CPU). -->
 		<!-- LOCAL feed version (QR decoder fixes, not on nuget.org): never push this to nuget.org. -->
-		<PackageReference Include="SpawnDev.ILGPU" Version="5.3.8-local.1" />
+		<PackageReference Include="SpawnDev.ILGPU" Version="5.3.8-local.2" />
 
 		<!-- Reachy Mini client + signalling. LOCAL feed version (Data's unreleased camera chain); never push this to nuget.org. -->
 		<PackageReference Include="SpawnDev.Reachy" Version="0.1.0-local.15" />
