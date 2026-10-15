@@ -1,6 +1,11 @@
 <Solution>
   <Folder Name="/Solution Items/">
     <File Path="PLAN.md" />
+    <File Path="README.md" />
   </Folder>
   <Project Path="Lenticulous/Lenticulous.csproj" />
+  <Project Path="Lenticulous.Core/Lenticulous.Core.csproj" />
+  <Project Path="Lenticulous.Tests/Lenticulous.Tests.csproj" />
+  <Project Path="Lenticulous.TestConsole/Lenticulous.TestConsole.csproj" />
+  <Project Path="PlaywrightMultiTest/PlaywrightMultiTest.csproj" />
 </Solution>

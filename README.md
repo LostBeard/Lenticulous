@@ -31,10 +31,14 @@ its sub-pixels and the display shows real 3D. Manufacturers do not publish it, a
   app knows which display it is looking at.
 - A brightness meter on the camera picture.
 
+- The scan logic (`Lenticulous.Core`): dimmest-first target selection, coverage, clustering sub-pixels into views, ordering
+  and sizing the views from camera positions, finding the repeating cell, and export in the 3DGM pixel pattern format. Tested
+  on the desktop against a real 8-view pattern with a simulated camera.
+
 ## Not built yet
 
-Single sub-pixel stimulus and read-back, the scan loop, coverage check, view assignment, and export in the formats the
-3DGM renderers read. See [PLAN.md](PLAN.md).
+Single sub-pixel stimulus and read-back through the robot camera, driving the scan loop with real captures, and checking the
+result on hardware. See [PLAN.md](PLAN.md).
 
 ## Run it
 

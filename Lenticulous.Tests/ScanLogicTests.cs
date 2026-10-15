@@ -1,0 +1,197 @@
+using Lenticulous.Scan;
+using SpawnDev.UnitTesting;
+
+namespace Lenticulous.Tests;
+
+/// <summary>
+/// The scan logic against a real pattern. Ground truth is TJ's 12x24, 8-view example from the 3DGM GMRender package; the camera is
+/// simulated (see <see cref="ScanSimulator"/>), the logic under test is the production code: dimmest-target selection, coverage,
+/// view clustering, ordering by camera position, redundant-scan detection and tile extraction.
+/// </summary>
+public class ScanLogicTests
+{
+    private static void Check(bool condition, string what)
+    {
+        if (!condition) throw new Exception(what);
+    }
+
+    private static ScanSimulator Simulator(int seed = 1, double noise = 0.04, double sigma = 0.40)
+        // 20 pixels wide (60 sub-pixels, 2.5 periods) by 30 rows (2.5 periods), offset on the panel so the tile has to be rolled back.
+        => new(KnownPatterns.GMRenderExample, KnownPatterns.Cols, KnownPatterns.Rows, pixelWidth: 20, height: 30,
+            originPixelX: 7, originY: 5, sigma: sigma, noise: noise, seed: seed);
+
+    private static int WrongViews(ScanSimulator sim, ViewAssignment assignment, bool reversed = false)
+    {
+        int wrong = 0;
+        for (int y = 0; y < sim.Height; y++)
+            for (int sx = 0; sx < sim.SubWidth; sx++)
+            {
+                int truth = sim.TruthView(sx, y);
+                int expected = reversed ? assignment.ViewCount - 1 - truth : truth;
+                if (assignment.ViewOf[y * sim.SubWidth + sx] != expected) wrong++;
+            }
+        return wrong;
+    }
+
+    [TestMethod]
+    public void KnownPattern_HasEightViewsAndIsPeriodic()
+    {
+        // The ground truth itself: a 12x24 cell, 8 views, and every view owns the same number of sub-pixels (36 of 288).
+        Check(KnownPatterns.GMRenderExample.Length == KnownPatterns.Rows * KnownPatterns.Cols, "pattern size");
+        var counts = new int[KnownPatterns.ViewCount];
+        foreach (int v in KnownPatterns.GMRenderExample) counts[v]++;
+        Check(counts.All(c => c == 36), $"expected 36 sub-pixels per view, got [{string.Join(",", counts)}]");
+    }
+
+    [TestMethod]
+    public void ScanLoop_RecoversTheViewOfEverySubPixel()
+    {
+        var sim = Simulator();
+        var set = sim.RunScanLoop();
+        Check(set.NextTarget() == null, $"the loop stopped with sub-pixels still unseen (coverage {set.Coverage():P1})");
+        Check(set.Count >= KnownPatterns.ViewCount, $"{set.Count} scans cannot cover {KnownPatterns.ViewCount} views");
+        Check(set.Count <= 24, $"{set.Count} scans: the dimmest-first loop should cover 8 views in a handful of scans");
+        var assignment = ViewAssigner.Assign(set);
+        Check(assignment.ViewCount == KnownPatterns.ViewCount, $"found {assignment.ViewCount} views, the display has {KnownPatterns.ViewCount}");
+        int wrong = WrongViews(sim, assignment);
+        Check(wrong == 0, $"{wrong} of {sim.SubWidth * sim.Height} sub-pixels got the wrong view");
+        Check(assignment.Balance >= 0.85, $"views should own equal numbers of sub-pixels, balance {assignment.Balance:0.00}");
+        Console.WriteLine($"[Scan] {set.Count} scans, {assignment.ViewCount} views, all {sim.SubWidth * sim.Height} sub-pixels right, balance {assignment.Balance:0.00}");
+    }
+
+    [TestMethod]
+    public void ScanLoop_ViewWidthComesFromCameraPositions()
+    {
+        // The camera travels one view width between neighbouring views: measured from the scans' positions, not told.
+        var sim = Simulator();
+        var assignment = ViewAssigner.Assign(sim.RunScanLoop());
+        Check(Math.Abs(assignment.ViewWidth - 1.0) < 0.1, $"view width {assignment.ViewWidth:0.000}, expected 1.0 view width");
+        for (int v = 1; v < assignment.ViewPosition.Length; v++)
+            Check(assignment.ViewPosition[v] > assignment.ViewPosition[v - 1], "views must be ordered by camera position");
+    }
+
+    [TestMethod]
+    public void ScanLoop_ReversedCameraAxisReversesTheNumbers()
+    {
+        // Views are numbered in ascending camera position. A camera whose axis runs the other way gets the mirrored numbering,
+        // which the pattern's reverse flag exists for.
+        var sim = Simulator(seed: 3);
+        var assignment = ViewAssigner.Assign(sim.RunScanLoop(reverseAxis: true));
+        Check(assignment.ViewCount == KnownPatterns.ViewCount, $"found {assignment.ViewCount} views");
+        int wrong = WrongViews(sim, assignment, reversed: true);
+        Check(wrong == 0, $"{wrong} sub-pixels not mirrored");
+    }
+
+    [TestMethod]
+    public void ScanLoop_SurvivesHeavySensorNoise()
+    {
+        foreach (int seed in new[] { 11, 12, 13 })
+        {
+            var sim = Simulator(seed: seed, noise: 0.12);
+            var set = sim.RunScanLoop();
+            var assignment = ViewAssigner.Assign(set);
+            Check(assignment.ViewCount == KnownPatterns.ViewCount, $"seed {seed}: found {assignment.ViewCount} views in noise");
+            int wrong = WrongViews(sim, assignment);
+            Check(wrong <= sim.SubWidth * sim.Height / 100, $"seed {seed}: {wrong} wrong sub-pixels in noise (more than 1%)");
+        }
+    }
+
+    [TestMethod]
+    public void RedundantScansAreReportedAndHarmless()
+    {
+        // The camera lands in the same viewing zone twice. The extra scans add nothing, are reported so they can be discarded, and
+        // do not change the answer.
+        var sim = Simulator(seed: 5);
+        var baseline = ViewAssigner.Assign(sim.RunScanLoop());
+        var set = sim.RunScanLoop();
+        int before = set.Count;
+        for (int v = 0; v < KnownPatterns.ViewCount; v++)
+            set.Add(sim.Scan(v + 0.5 + 0.05));
+        var withExtras = ViewAssigner.Assign(set);
+        Check(withExtras.ViewCount == KnownPatterns.ViewCount, $"extra scans changed the view count to {withExtras.ViewCount}");
+        Check(WrongViews(sim, withExtras) == 0, "extra scans changed the assignment");
+        Check(withExtras.RedundantScans.Length >= KnownPatterns.ViewCount,
+            $"{set.Count - before} duplicate scans added but only {withExtras.RedundantScans.Length} reported redundant");
+        Check(baseline.RedundantScans.Length < withExtras.RedundantScans.Length, "adding duplicates must raise the redundant count");
+    }
+
+    [TestMethod]
+    public void NextTarget_IsTheDimmestSubPixelAndStopsWhenCovered()
+    {
+        var sim = Simulator(seed: 7);
+        var set = new ScanSet(sim.SubWidth, sim.Height);
+        var first = set.NextTarget();
+        Check(first == new SubPixelTarget(0, 0), "with no scans the loop starts at the top-left sub-pixel");
+        int firstView = sim.TruthView(0, 0);
+        set.Add(sim.Scan(firstView + 0.5));
+        var next = set.NextTarget();
+        Check(next != null, "after one scan most sub-pixels are still unseen");
+        Check(sim.TruthView(next!.Value.SubX, next.Value.Y) != firstView, "the next target must be a sub-pixel the first scan did NOT see bright");
+        double covered = set.Coverage();
+        Check(covered > 0.05 && covered < 0.30, $"one scan of an 8-view display should cover about 1/8, covered {covered:P1}");
+        while (set.NextTarget() is { } t) set.Add(sim.Scan(sim.TruthView(t.SubX, t.Y) + 0.5));
+        Check(set.Coverage() >= 0.999, $"loop ended at coverage {set.Coverage():P2}");
+    }
+
+    [TestMethod]
+    public void TileExtraction_RebuildsThePatternOnThePanelGrid()
+    {
+        var sim = Simulator(seed: 9);
+        var assignment = ViewAssigner.Assign(sim.RunScanLoop());
+        var tile = PixelPatternTile.Extract(assignment.ViewOf, sim.SubWidth, sim.Height, assignment.ViewCount,
+            originSubX: 3 * sim.OriginPixelX, originY: sim.OriginY);
+        Check(tile != null, "no repeating cell found in a region of 2.5 periods");
+        Check(tile!.Cols == KnownPatterns.Cols && tile.Rows == KnownPatterns.Rows, $"cell {tile.Cols}x{tile.Rows}, expected {KnownPatterns.Cols}x{KnownPatterns.Rows}");
+        for (int i = 0; i < tile.Views.Length; i++)
+            Check(tile.Views[i] == KnownPatterns.GMRenderExample[i], $"cell {i} is view {tile.Views[i]}, expected {KnownPatterns.GMRenderExample[i]}");
+        Check(tile.Agreement >= 0.99, $"agreement {tile.Agreement:0.000}");
+    }
+
+    /// <summary>Reads a pixel pattern ini the way RendererPixelPatternBase does (CSV data, rows, cols, format, reverse, views).</summary>
+    private static (byte[] Data, int Rows, int Cols, string Format, bool Reverse, int Views, int ViewCountFromData, bool Available) ParseLikeTheRenderer(string ini)
+    {
+        var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var raw in ini.Split('\n'))
+        {
+            var line = raw.Trim();
+            if (line.Length == 0 || line.StartsWith(';') || line.StartsWith('[')) continue;
+            int eq = line.IndexOf('=');
+            if (eq > 0) values[line[..eq].Trim()] = line[(eq + 1)..].Trim();
+        }
+        var data = values["data"].Trim(',').Split(',').Select(t => byte.Parse(t.Trim())).ToArray();
+        int rows = int.Parse(values["rows"]), cols = int.Parse(values["cols"]);
+        int views = values.TryGetValue("views", out var v) ? int.Parse(v) : 0;
+        int viewCount = Math.Max(views, data.Max() + 1);
+        bool reverse = values.TryGetValue("reverse", out var r) && (r == "1" || r.Equals("true", StringComparison.OrdinalIgnoreCase));
+        return (data, rows, cols, values.GetValueOrDefault("format", "bgr"), reverse, views, viewCount, data.Length == cols * rows && viewCount > 0);
+    }
+
+    [TestMethod]
+    public void Export_WritesWhatTheRendererReads()
+    {
+        var sim = Simulator(seed: 4);
+        var assignment = ViewAssigner.Assign(sim.RunScanLoop());
+        var tile = PixelPatternTile.Extract(assignment.ViewOf, sim.SubWidth, sim.Height, assignment.ViewCount,
+            3 * sim.OriginPixelX, sim.OriginY)!;
+        var parsed = ParseLikeTheRenderer(PixelPatternExporter.ToIni(tile, "Philips 22-3D2N11"));
+        Check(parsed.Available, "the renderer would reject the file: data.Length != rows * cols or no views");
+        Check(parsed.Rows == KnownPatterns.Rows && parsed.Cols == KnownPatterns.Cols, $"cell {parsed.Cols}x{parsed.Rows} in the file");
+        Check(parsed.Format == "rgb", $"format {parsed.Format}: the scan grid is in colour order");
+        Check(parsed.ViewCountFromData == KnownPatterns.ViewCount, $"renderer would see {parsed.ViewCountFromData} views");
+        Check(!parsed.Reverse, "reverse must default to 0");
+        for (int i = 0; i < parsed.Data.Length; i++)
+            Check(parsed.Data[i] == KnownPatterns.GMRenderExample[i], $"data[{i}] = {parsed.Data[i]}, the display's pattern has {KnownPatterns.GMRenderExample[i]}");
+        Check(ParseLikeTheRenderer(PixelPatternExporter.ToIni(tile, "x", reverse: true)).Reverse, "reverse=1 was not written");
+        Check(PixelPatternExporter.ToIni(tile, "Philips 22-3D2N11").StartsWith("name=Philips 22-3D2N11"), "name line");
+    }
+
+    [TestMethod]
+    public void TileExtraction_RejectsARegionWithNoRepeat()
+    {
+        // Random views do not repeat, so no small cell may be reported.
+        var rng = new Random(2);
+        int subWidth = 60, height = 30;
+        var views = Enumerable.Range(0, subWidth * height).Select(_ => rng.Next(8)).ToArray();
+        Check(PixelPatternTile.Extract(views, subWidth, height, 8) == null, "a random region must not produce a tile");
+    }
+}

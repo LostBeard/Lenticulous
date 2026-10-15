@@ -206,6 +206,31 @@ is version 2 on purpose); tilts of 65 degrees yaw / 60 pitch do not read; blur p
 takes a JS typed array or GPU buffer and the finder search is CPU (Rule 4). NOT yet re-checked on the real camera after local.2
 (the robot was in use for a Vertex test).
 
+## Scan logic (`Lenticulous.Core`, built 2026-10-15, no robot needed) - P3/P4/P5 logic DONE
+
+Plain C# in `Lenticulous.Core/Scan`, tested on the desktop through PlaywrightMultiTest (`Lenticulous.Tests`, run by
+`Lenticulous.TestConsole`):
+- `ScanRecord` - one finished scan (a camera position and the brightness of every sub-pixel), normalised per scan (5th percentile
+  floor, 99th percentile peak) so exposure and room light cancel. Sub-pixels are addressed `3 * pixelX + colour channel`
+  (0 red, 1 green, 2 blue), which is what the stimulus lights and what the 3DGM files use, whatever the panel's stripe order.
+- `ScanSet` - `NextTarget()` is the dimmest sub-pixel across all scans (null once every one has been seen at 0.6 of a scan's
+  peak); `Coverage()`.
+- `ViewAssigner` - a sub-pixel's brightness across the scans is its fingerprint: every sub-pixel of one view is bright in the same
+  scans. Clusters those profiles by cosine similarity (leader pass, refine, merge, drop noise), orders the views by the camera
+  position where each is brightest, and gives the view count, each sub-pixel's view, the view width (median spacing of adjacent
+  views' camera positions), the balance (smallest view over largest) and the redundant scans that can be discarded.
+- `PixelPatternTile` - finds the smallest repeating cell (columns a multiple of 3, must repeat twice across the region), by
+  majority vote, aligned to the PANEL (the region's offset rolls the cell, as a renderer tiles from the panel corner).
+- `PixelPatternExporter` - the 3DGM ini: `data` (view per sub-pixel, row-major), `rows`, `cols` (sub-pixel columns), `format=rgb`,
+  `views`, `reverse`. Read back from `RendererPixelPatternBase` in the 3DGM source; index 0 is the farthest LEFT view by convention.
+Ground truth in the tests is TJ's real 12x24, 8-view pattern from the GMRender package; the camera is simulated (Gaussian response
+per view, exposure changing every scan, sensor noise). Results: the loop covers all 8 views in a handful of scans, every one of
+the 1800 sub-pixels gets the right view, view width recovered as 1.0, a mirrored camera axis mirrors the numbers, sensor noise
+sigma 0.12 still gives 8 views with at most 1% wrong, the 12x24 cell is rebuilt exactly from a region of 2.5 periods at an offset
+position, the exported file passes the renderer's own acceptance rule. 11 tests green; red-checked by breaking 8 guards one at a
+time (each caught: 1 to 7 tests fail).
+NOT yet validated on real hardware: the simulation assumes a Gaussian view response and a known camera position per scan.
+
 ## Open questions
 
 - Does the Philips keep its lens effect with no Dimenco header (raw mode), and does the header ever have to be off for a scan?
