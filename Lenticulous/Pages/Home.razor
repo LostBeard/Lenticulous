@@ -1,0 +1,339 @@
+@page "/"
+@implements IDisposable
+@inject SpawnJSRuntime JS
+@inject NavigationManager Nav
+@inject Lenticulous.Services.RobotService Robot
+
+<div class="page">
+    <h1>Lenticulous</h1>
+    <p class="sub">Recovers the pixel pattern of a lenticular display by scanning it with a webcam.</p>
+
+    <div class="panel">
+        <h2>1. Choose the display to scan</h2>
+        <p class="muted">Needs the Window Management permission, so the stimulus window can be placed on the 3D display.</p>
+        <button @onclick="DetectScreensAsync">Detect screens</button>
+        @if (_error != null)
+        {
+            <p class="bad">@_error</p>
+        }
+        @if (_screens.Count > 0)
+        {
+            <table>
+                <thead>
+                    <tr><th></th><th>Label</th><th>Size</th><th>Position</th><th>Scale</th></tr>
+                </thead>
+                <tbody>
+                    @for (var i = 0; i < _screens.Count; i++)
+                    {
+                        var index = i;
+                        var s = _screens[i];
+                        <tr class="@(index == _selected ? "sel" : "")" @onclick="() => SelectScreen(index)">
+                            <td><input type="radio" checked="@(index == _selected)" /></td>
+                            <td>@s.Label @(s.IsPrimary ? "(primary)" : "")</td>
+                            <td>@s.Width x @s.Height</td>
+                            <td>@s.Left, @s.Top</td>
+                            <td>@s.DevicePixelRatio.ToString("0.##")</td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+            <button disabled="@(_selected < 0)" @onclick="OpenStimulus">Open stimulus window on selected display</button>
+            <p class="muted">In the stimulus window, click once to go fullscreen. Browser scaling must be 100% so one CSS pixel is one display pixel.</p>
+        }
+    </div>
+
+    <div class="panel">
+        <h2>Display details</h2>
+        <p class="muted">Screen size comes from you: the display's own EDID is often wrong.</p>
+        <div class="form">
+            <label>Project name <input @bind="_project.ProjectName" /></label>
+            <label>Display name <input @bind="_project.DisplayName" /></label>
+            <label>Width (pixels) <input type="number" @bind="_project.WidthPx" /></label>
+            <label>Height (pixels) <input type="number" @bind="_project.HeightPx" /></label>
+            <label>Screen width (cm) <input type="number" step="0.1" @bind="_project.PhysicalWidthCm" /></label>
+            <label>Screen height (cm) <input type="number" step="0.1" @bind="_project.PhysicalHeightCm" /></label>
+        </div>
+        @if (_project.PixelPitchXmm > 0 && _project.PixelPitchYmm > 0)
+        {
+            <p class="muted">
+                Pixel pitch @_project.PixelPitchXmm.ToString("0.000") x @_project.PixelPitchYmm.ToString("0.000") mm,
+                sub-pixel @_project.SubPixelWidthMm.ToString("0.000") mm wide.
+            </p>
+        }
+    </div>
+
+    <div class="panel">
+        <h2>2. Robot camera (Reachy Mini)</h2>
+        <p class="muted">Check robot only reads status. Wake and Park move the robot; Park uses the confirmed recipe (home, sleep, motors off).</p>
+        <input @bind="_robotAddress" size="24" />
+        <button @onclick="CheckRobotAsync">Check robot</button>
+        <button @onclick="ConnectVideoAsync" disabled="@_busy">Connect video</button>
+        <button @onclick="WakeAsync" disabled="@_busy">Wake</button>
+        <button @onclick="ParkAsync" disabled="@_busy">Park and disconnect</button>
+        <button @onclick="ShowPoseAsync" disabled="@_busy">Read pose</button>
+        <button @onclick="FindDisplayAsync" disabled="@_busy">Find display (turns the robot)</button>
+        <button @onclick="FindDisplayByCodeAsync" disabled="@_busy">Find display by ID code</button>
+        @if (_codeText != "")
+        {
+            <pre>@_codeText</pre>
+        }
+        @if (_poseText != "")
+        {
+            <pre>@_poseText</pre>
+        }
+        @if (_sweepText != "")
+        {
+            <pre>@_sweepText</pre>
+        }
+        @if (_robotStatus != null)
+        {
+            <pre>@_robotStatus</pre>
+        }
+        <pre>@_videoInfo</pre>
+        <div id="camera-host" style="max-width: 640px"></div>
+    </div>
+
+    <div class="panel">
+        <h2>3. Stimulus window</h2>
+        <button @onclick='() => Stimulus("fill 255 255 255")'>White</button>
+        <button @onclick='() => Stimulus("fill 0 0 0")'>Black</button>
+        <button @onclick='() => Stimulus("info 0")'>Hide info</button>
+        <button @onclick='() => Stimulus("info 1")'>Show info</button>
+        <button @onclick='() => Stimulus("qr 1")'>Show ID code</button>
+        <button @onclick='() => Stimulus("qr 0")'>Hide ID code</button>
+        @if (_stimulusStatus == null)
+        {
+            <p class="muted">No stimulus window reporting yet.</p>
+        }
+        else
+        {
+            <pre>@_stimulusStatus</pre>
+        }
+    </div>
+</div>
+
+@code {
+    BroadcastChannel? _channel;
+    string? _stimulusStatus;
+    string _robotAddress = "192.168.1.170";
+    string? _robotStatus;
+    readonly DisplayProject _project = new();
+
+    void SelectScreen(int index)
+    {
+        _selected = index;
+        var s = _screens[index];
+        // Pixel size is known from the browser. Name is only a suggestion; physical size is left to the user.
+        _project.WidthPx = s.Width;
+        _project.HeightPx = s.Height;
+        if (string.IsNullOrWhiteSpace(_project.DisplayName)) _project.DisplayName = s.Label;
+    }
+
+    async Task CheckRobotAsync()
+    {
+        _robotStatus = "Asking the daemon...";
+        StateHasChanged();
+        try
+        {
+            using var client = new SpawnDev.Reachy.ReachyMiniClient(_robotAddress.Trim());
+            var status = await client.GetStatusAsync();
+            var motors = await client.GetMotorStatusAsync();
+            _robotStatus = status == null
+                ? $"No daemon answered at {_robotAddress}."
+                : $"robot        {status.RobotName}\n" +
+                  $"daemon       {status.Version}  state {status.State}\n" +
+                  $"wireless     {status.WirelessVersion}  ip {status.WlanIp}\n" +
+                  $"motors       {motors?.Mode ?? "unknown"}";
+        }
+        catch (Exception ex)
+        {
+            _robotStatus = $"Could not reach {_robotAddress}: {ex.GetType().Name}: {ex.Message}";
+        }
+    }
+
+    bool _busy;
+    string _videoInfo = "";
+    readonly List<string> _robotLog = new();
+    bool _alive = true;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(1));
+        while (_alive && await timer.WaitForNextTickAsync())
+        {
+            if (!Robot.VideoConnected) continue;
+            var grid = Robot.BrightnessGrid4x4();
+            var gridText = grid == null ? "no picture yet"
+                : "brightness 4x4: " + string.Join(" | ", Enumerable.Range(0, 4).Select(r => string.Join(" ", grid.Skip(r * 4).Take(4).Select(v => v.ToString().PadLeft(3)))));
+            _videoInfo = $"link {Robot.LinkState}\n{Robot.TrackInfo}\n{Robot.VideoElementInfo()}\n{gridText}\n" + string.Join("\n", _robotLog.TakeLast(14));
+            StateHasChanged();
+        }
+    }
+
+    void OnRobotLog(string message)
+    {
+        _robotLog.Add(message);
+        if (_robotLog.Count > 50) _robotLog.RemoveAt(0);
+    }
+
+    async Task RunRobotAsync(Func<Task> action)
+    {
+        if (_busy) return;
+        _busy = true;
+        try { await action(); }
+        catch (Exception ex) { OnRobotLog($"failed: {ex.GetType().Name}: {ex.Message}"); _videoInfo = string.Join("\n", _robotLog.TakeLast(14)); }
+        finally { _busy = false; StateHasChanged(); }
+    }
+
+    Task ConnectVideoAsync() => RunRobotAsync(() => Robot.ConnectVideoAsync(_robotAddress, "camera-host"));
+    Task WakeAsync() => RunRobotAsync(() => Robot.WakeAsync(_robotAddress));
+    Task ParkAsync() => RunRobotAsync(async () => { await Robot.DisconnectVideoAsync(); await Robot.ParkAsync(_robotAddress); });
+
+    protected override void OnInitialized()
+    {
+        Robot.Log += OnRobotLog;
+        _channel = new BroadcastChannel(StimulusChannel.Name);
+        _channel.OnMessage += OnStimulusMessage;
+    }
+
+    void OnStimulusMessage(MessageEvent e)
+    {
+        var text = e.GetData<string>();
+        if (text == null || !text.StartsWith(StimulusChannel.StatusPrefix, StringComparison.Ordinal)) return;
+        _stimulusStatus = text.Substring(StimulusChannel.StatusPrefix.Length);
+        // The first status line is "id XXXXXXXX": remember every stimulus window that has reported, so a decoded code can be matched.
+        var first = _stimulusStatus.Split('\n', 2)[0];
+        if (first.StartsWith("id ", StringComparison.Ordinal)) _stimulusIds[first.Substring(3).Trim()] = DateTime.Now;
+        StateHasChanged();
+    }
+
+    readonly Dictionary<string, DateTime> _stimulusIds = new();
+    string _codeText = "";
+
+    /// <summary>
+    /// Find which display the camera is looking at by reading its ID code. Tries the current view first, then sweeps the
+    /// head (world yaw, body held turned) and stops at the first code that decodes.
+    /// </summary>
+    Task FindDisplayByCodeAsync() => RunRobotAsync(async () =>
+    {
+        Stimulus("info 0");
+        Stimulus("clear");
+        Stimulus("qr 1");
+        _codeText = "showing the code, looking...";
+        StateHasChanged();
+        var rows = new List<string>();
+        var heads = new double?[] { null, 90, 75, 60, 45, 30, 15, 0 }; // null = where the head already is
+        foreach (var head in heads)
+        {
+            if (head is { } yaw) await Robot.TurnAsync(_robotAddress, 55, yaw);
+            await Task.Delay(1000); // exposure and focus settle after a move
+            var pose = await Robot.PoseTextAsync(_robotAddress);
+            for (var attempt = 1; attempt <= 3; attempt++)
+            {
+                var r = Robot.TryDecodeQr();
+                rows.Add($"{(head is { } y ? $"head {y,3:0}" : "current   ")} try {attempt}: frame {r.Width}x{r.Height}, decode {r.DecodeMs:0} ms, " + (r.Text == null ? "no code" : $"CODE \"{r.Text}\"") + $"   [{pose}]");
+                _codeText = string.Join("\n", rows);
+                StateHasChanged();
+                if (r.Text != null)
+                {
+                    var id = r.Text.StartsWith(StimulusChannel.QrPayloadPrefix, StringComparison.Ordinal) ? r.Text.Substring(StimulusChannel.QrPayloadPrefix.Length) : null;
+                    var known = id != null && _stimulusIds.ContainsKey(id);
+                    rows.Add(known ? $"FOUND display window {id} (one of the stimulus windows reporting to this page), robot left here." : $"decoded \"{r.Text}\" but it is not a known stimulus window id.");
+                    _codeText = string.Join("\n", rows);
+                    return;
+                }
+                await Task.Delay(400);
+            }
+        }
+        rows.Add("no code decoded at any position.");
+        _codeText = string.Join("\n", rows);
+    });
+
+    void Stimulus(string command) => _channel?.PostMessage(StimulusChannel.CommandPrefix + command);
+
+    string _poseText = "";
+    string _sweepText = "";
+
+    Task ShowPoseAsync() => RunRobotAsync(async () => _poseText = await Robot.PoseTextAsync(_robotAddress));
+
+    /// <summary>
+    /// Turn the robot in steps and read the picture's brightness at each: the white stimulus window is the brightest
+    /// large thing in the room, so the step where the mean peaks is where the robot faces the display.
+    /// </summary>
+    Task FindDisplayAsync() => RunRobotAsync(async () =>
+    {
+        _sweepText = "sweeping...";
+        StateHasChanged();
+        var rows = new List<string>();
+        // Positive yaw is left. MEASURED 2026-10-15 (TJ watching the robot): the commanded head yaw is a WORLD yaw, not
+        // relative to the body - turning the body under a head at 0 left the head facing forward. So the body is held
+        // turned (max about 56 deg, and it must stay within about 65 deg of the head) and the head's world yaw sweeps.
+        var steps = new List<(double Body, double Head)> { (55, 0), (55, 15), (55, 30), (55, 45), (55, 60), (55, 75), (55, 90) };
+        var best = (Body: 0d, Head: 0d, Mean: double.MinValue);
+        foreach (var (body, head) in steps)
+        {
+            await Robot.TurnAsync(_robotAddress, body, head);
+            await Task.Delay(600); // let the picture settle after the move
+            var mean = Robot.MeanBrightness() ?? double.NaN;
+            var pose = await Robot.PoseTextAsync(_robotAddress);
+            rows.Add($"commanded body {body,3:0} head {head,3:0}  mean brightness {mean,6:0.0}   read back: {pose}");
+            if (mean > best.Mean) best = (body, head, mean);
+            _sweepText = string.Join("\n", rows);
+            StateHasChanged();
+        }
+        await Robot.TurnAsync(_robotAddress, best.Body, best.Head);
+        rows.Add($"brightest at body {best.Body:0} head {best.Head:0} (mean {best.Mean:0.0}); robot left there");
+        _sweepText = string.Join("\n", rows);
+    });
+
+    public void Dispose()
+    {
+        _alive = false;
+        Robot.Log -= OnRobotLog;
+        if (_channel == null) return;
+        _channel.OnMessage -= OnStimulusMessage;
+        _channel.Close();
+        _channel.Dispose();
+        _channel = null;
+    }
+
+    record ScreenInfo(string Label, int Width, int Height, int Left, int Top, double DevicePixelRatio, bool IsPrimary);
+
+    readonly List<ScreenInfo> _screens = new();
+    int _selected = -1;
+    string? _error;
+
+    async Task DetectScreensAsync()
+    {
+        _error = null;
+        _screens.Clear();
+        _selected = -1;
+        try
+        {
+            using var window = JS.Get<Window>("window");
+            using var details = await window.GetScreenDetails();
+            using var screens = details.Screens;
+            foreach (var s in screens.ToArray<ScreenDetailed>())
+            {
+                _screens.Add(new ScreenInfo(s.Label, s.Width, s.Height, s.Left, s.Top, s.DevicePixelRatio, s.IsPrimary));
+                s.Dispose();
+            }
+        }
+        catch (Exception ex)
+        {
+            _error = "Could not read screens: " + ex.Message;
+        }
+    }
+
+    void OpenStimulus()
+    {
+        if (_selected < 0 || _selected >= _screens.Count) return;
+        var s = _screens[_selected];
+        var url = new Uri(new Uri(Nav.BaseUri), "stimulus").ToString();
+        // popup=yes + left/top/width/height places the window on the chosen monitor (needs the Window Management permission)
+        var features = $"popup=yes,left={s.Left},top={s.Top},width={s.Width},height={s.Height}";
+        using var window = JS.Get<Window>("window");
+        window.Open(url, "lenticulous-stimulus", features)?.Dispose();
+    }
+}

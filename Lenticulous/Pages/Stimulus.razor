@@ -1,0 +1,173 @@
+@page "/stimulus"
+@implements IDisposable
+@inject SpawnJSRuntime JS
+
+<PageTitle>Lenticulous stimulus</PageTitle>
+
+<div class="stimulus" style="background: @_background" @onclick="GoFullscreenAsync" @onmousemove="OnMouseMove">
+    @if (_showInfo)
+    {
+        <div class="stimulus-info">@_info</div>
+    }
+    @if (_qrPath != null)
+    {
+        @* The display's ID code: black modules on white, quiet zone included, integer pixels per module so the edges are sharp. *@
+        <svg class="stimulus-qr" width="@_qrPx" height="@_qrPx" viewBox="0 0 @_qrModules @_qrModules" shape-rendering="crispEdges">
+            <rect width="@_qrModules" height="@_qrModules" fill="#fff" />
+            <path d="@_qrPath" fill="#000" />
+        </svg>
+    }
+    @* One CSS pixel is one panel pixel at scale 1; a single colour channel lights a single sub-pixel. *@
+    @foreach (var p in _pixels)
+    {
+        <div class="stimulus-px" style="left: @(p.X)px; top: @(p.Y)px; background: @p.Color"></div>
+    }
+</div>
+
+@code {
+    record Pixel(int X, int Y, string Color);
+
+    /// <summary>This window's identity. The QR code carries it, so a camera that decodes the code knows WHICH display it sees.</summary>
+    readonly string _id = Guid.NewGuid().ToString("N").Substring(0, 8);
+    const int QuietZone = 4;
+    string? _qrPath;    // null = no code shown
+    int _qrModules;     // modules per side, quiet zone included
+    int _qrPx;          // rendered side in CSS pixels = whole pixels per module * modules
+    string _info = "";
+    string _background = "#000";
+    bool _showInfo = true;
+    readonly List<Pixel> _pixels = new();
+    bool _running = true;
+    BroadcastChannel? _channel;
+    // Where this viewport's pixel (0,0) sits on the panel. Needs a mouse event: ScreenX - ClientX is the only
+    // direct measurement (an infobar, taskbar or window frame all shift it). Null until the mouse moves.
+    (int X, int Y)? _origin;
+    (int Left, int Top)? _screenLeftTop;
+
+    async Task OnMouseMove(MouseEventArgs e)
+    {
+        if (_screenLeftTop == null)
+        {
+            using var window = JS.Get<Window>("window");
+            using var details = await window.GetScreenDetails();
+            using var current = details.CurrentScreen;
+            _screenLeftTop = (current.Left, current.Top);
+        }
+        _origin = ((int)Math.Round(e.ScreenX - e.ClientX) - _screenLeftTop.Value.Left,
+                   (int)Math.Round(e.ScreenY - e.ClientY) - _screenLeftTop.Value.Top);
+    }
+
+    /// <summary>Commands from the control page: "cmd:fill r g b", "cmd:info 0|1", "cmd:px x y r g b", "cmd:clear".</summary>
+    void OnMessage(MessageEvent e)
+    {
+        var text = e.GetData<string>();
+        if (text == null || !text.StartsWith(StimulusChannel.CommandPrefix, StringComparison.Ordinal)) return;
+        var parts = text.Substring(StimulusChannel.CommandPrefix.Length).Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        if (parts.Length == 0) return;
+        switch (parts[0])
+        {
+            case "fill" when parts.Length == 4:
+                _background = $"rgb({parts[1]}, {parts[2]}, {parts[3]})";
+                break;
+            case "info" when parts.Length == 2:
+                _showInfo = parts[1] != "0";
+                break;
+            case "px" when parts.Length == 6:
+                _pixels.Add(new Pixel(int.Parse(parts[1]), int.Parse(parts[2]), $"rgb({parts[3]}, {parts[4]}, {parts[5]})"));
+                break;
+            case "qr" when parts.Length == 2:
+                if (parts[1] == "0") _qrPath = null;
+                else ShowQr();
+                break;
+            case "clear":
+                _pixels.Clear();
+                _background = "#000";
+                _qrPath = null;
+                break;
+            default:
+                return;
+        }
+        StateHasChanged();
+    }
+
+    void ShowQr()
+    {
+        // Error correction H (30%): the code is read through a lenticular lens and a camera at an angle.
+        var modules = SpawnDev.ILGPU.QR.QRCode.EncodeMatrix(StimulusChannel.QrPayloadPrefix + _id, SpawnDev.ILGPU.QR.QRTables.ECLevel.H);
+        var n = modules.GetLength(0);
+        var path = new System.Text.StringBuilder();
+        for (var y = 0; y < n; y++)
+            for (var x = 0; x < n; x++)
+                if (modules[y, x]) path.Append($"M{x + QuietZone},{y + QuietZone}h1v1h-1z");
+        _qrModules = n + 2 * QuietZone;
+        // About 60% of the shorter side, in whole pixels per module, never smaller than 8.
+        using var window = JS.Get<Window>("window");
+        var side = Math.Min(window.InnerWidth, window.InnerHeight);
+        var perModule = Math.Max(8, (int)(side * 0.6) / _qrModules);
+        _qrPx = perModule * _qrModules;
+        _qrPath = path.ToString();
+    }
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+        // Reports this window's state to the control page (Home) so it can show what the 3D display really received,
+        // and listens for its commands.
+        _channel = new BroadcastChannel(StimulusChannel.Name);
+        _channel.OnMessage += OnMessage;
+        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(500));
+        do
+        {
+            Refresh();
+            StateHasChanged();
+            _channel?.PostMessage(StimulusChannel.StatusPrefix + _info);
+        }
+        while (_running && await timer.WaitForNextTickAsync());
+    }
+
+    void Refresh()
+    {
+        using var window = JS.Get<Window>("window");
+        using var screen = window.Screen;
+        using var document = JS.Get<Document>("document");
+        using var fullscreen = document.FullscreenElement;
+        var dpr = window.DevicePixelRatio;
+        var cssW = window.InnerWidth;
+        var cssH = window.InnerHeight;
+        var devW = (int)Math.Round(cssW * dpr);
+        var devH = (int)Math.Round(cssH * dpr);
+        // 1:1 means scale exactly 1 and full panel width. A shorter viewport (infobar etc.) is fine: it is reported,
+        // and the origin line says where pixel (0,0) is.
+        var native = Math.Abs(dpr - 1d) < 0.001 && devW == screen.Width;
+        _info =
+            $"id            {_id}\n" +
+            $"screen        {screen.Width} x {screen.Height}\n" +
+            $"window (css)  {cssW} x {cssH}\n" +
+            $"scale         {dpr:0.###}\n" +
+            $"device pixels {devW} x {devH}\n" +
+            $"fullscreen    {(fullscreen != null ? "yes" : "no (click anywhere)")}\n" +
+            $"origin on panel {(_origin is { } o ? $"{o.X}, {o.Y}" : "unknown (move the mouse once)")}\n" +
+            $"native 1:1    {(native ? "YES" : "NO - fullscreen at 100% scale needed")}\n" +
+            $"covers panel  {(devW == screen.Width && devH == screen.Height ? "yes" : $"no ({screen.Width - devW} x {screen.Height - devH} px short)")}";
+    }
+
+    async Task GoFullscreenAsync()
+    {
+        using var document = JS.Get<Document>("document");
+        using var root = document.DocumentElement;
+        if (root == null) return;
+        await root.RequestFullscreen();
+    }
+
+    public void Dispose()
+    {
+        _running = false;
+        if (_channel != null)
+        {
+            _channel.OnMessage -= OnMessage;
+            _channel.Close();
+            _channel.Dispose();
+            _channel = null;
+        }
+    }
+}
