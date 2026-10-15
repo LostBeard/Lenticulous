@@ -126,6 +126,35 @@ public static class FrameDifference
         return new RegionResult(new DifferencePeak(bx, by, bc, roiBest), sums, noise, atLeast, total);
     }
 
+    /// <summary>
+    /// The light a target added inside one square of the picture, per colour channel, measured against the picture's global shift
+    /// (auto-exposure moves the whole frame a little between two captures; the shift is estimated from a sparse sample of the frame
+    /// and removed). Cheap enough to call for every sub-pixel of a scan.
+    /// </summary>
+    public static float[] RegionChannelSums(float[] dark, float[] lit, int width, int height, int channels, double centreX, double centreY, int radius)
+    {
+        int n = width * height * channels;
+        if (dark.Length != n || lit.Length != n) throw new ArgumentException($"frames must be {width}x{height}x{channels}");
+        var shifts = new float[channels];
+        for (int c = 0; c < channels; c++)
+        {
+            var sample = new List<float>();
+            for (int i = c; i < n; i += channels * 13) sample.Add(lit[i] - dark[i]);
+            sample.Sort();
+            shifts[c] = sample[sample.Count / 2];
+        }
+        int cx = (int)Math.Floor(centreX), cy = (int)Math.Floor(centreY);
+        var sums = new float[channels];
+        for (int y = Math.Max(0, cy - radius); y <= Math.Min(height - 1, cy + radius); y++)
+            for (int x = Math.Max(0, cx - radius); x <= Math.Min(width - 1, cx + radius); x++)
+                for (int c = 0; c < channels; c++)
+                {
+                    int i = (y * width + x) * channels + c;
+                    sums[c] += lit[i] - dark[i] - shifts[c];
+                }
+        return sums;
+    }
+
     /// <summary>A bright patch in a frame difference: its centre of light, its strength and its extent in camera pixels.</summary>
     public readonly record struct Blob(double X, double Y, double Peak, int Pixels, int Width, int Height);
 

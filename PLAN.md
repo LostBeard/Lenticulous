@@ -261,3 +261,11 @@ Noise sigma 1.48. The three sub-pixels differ in brightness because the camera s
 per-sub-pixel intensity is the signal the scan needs. Red is the weakest (+19.8, 13 sigma); it still ranks first or second in the
 frame, so detection is by rank at the predicted position, not by a frame-wide threshold (the camera has structured noise, so a
 frame-wide maximum is not trustworthy).
+
+## Measured: a row scan from one camera position (2026-10-15)
+
+8 pixels (24 sub-pixels) of the Philips at y=436, x=828..835, each lit alone, region sum of the lit channel at the predicted
+camera position (radius 4, 6 frames averaged, 27 s in total). The profile is bimodal: sub-pixels at offsets 0, 4, 9, 14, 18, 19
+and 23 give 8700 to 12050, the rest 600 to 4600 (mostly under 1500). The bright ones recur about every 4.5 sub-pixels, so this
+camera position sits inside one view and the view repeats about every 4.5 sub-pixels. Moving the camera sideways moves which
+sub-pixels are bright; that is the scan the view assignment is built on.

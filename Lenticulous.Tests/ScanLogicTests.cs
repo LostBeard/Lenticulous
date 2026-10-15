@@ -295,6 +295,21 @@ public class ScanLogicTests
     }
 
     [TestMethod]
+    public void RegionChannelSums_MeasureTheAddedLightAndIgnoreTheGlobalShift()
+    {
+        const int w = 200, h = 100;
+        var rng = new Random(5);
+        var dark = new float[w * h * 3];
+        var lit = new float[w * h * 3];
+        for (int i = 0; i < dark.Length; i++) { dark[i] = 40 + (float)rng.NextDouble(); lit[i] = dark[i] + 3f; } // auto-exposure: +3 everywhere
+        for (int dy = -1; dy <= 1; dy++)
+            for (int dx = -1; dx <= 1; dx++) lit[((50 + dy) * w + 120 + dx) * 3 + 1] += 25; // green light, 9 px x 25
+        var sums = FrameDifference.RegionChannelSums(dark, lit, w, h, 3, 120.5, 50.5, 4);
+        Check(Math.Abs(sums[1] - 225) < 5, $"green sum {sums[1]:0.0}, expected 225");
+        Check(Math.Abs(sums[0]) < 5 && Math.Abs(sums[2]) < 5, $"other channels {sums[0]:0.0}/{sums[2]:0.0}, expected 0 (the +3 shift removed)");
+    }
+
+    [TestMethod]
     public void BlobCentroid_FindsAPatchAndItsCentre()
     {
         // A soft 17x17-camera-pixel patch centred at (429.3, 182.6) on top of sensor noise; the other frame is a second dark capture.
