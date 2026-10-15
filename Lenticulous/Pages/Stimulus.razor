@@ -20,12 +20,12 @@
     @* One CSS pixel is one panel pixel at scale 1; a single colour channel lights a single sub-pixel. *@
     @foreach (var p in _pixels)
     {
-        <div class="stimulus-px" style="left: @(p.X)px; top: @(p.Y)px; background: @p.Color"></div>
+        <div class="stimulus-px" style="left: @(p.X)px; top: @(p.Y)px; width: @(p.W)px; height: @(p.H)px; background: @p.Color"></div>
     }
 </div>
 
 @code {
-    record Pixel(int X, int Y, string Color);
+    record Pixel(int X, int Y, int W, int H, string Color);
 
     /// <summary>This window's identity. The QR code carries it, so a camera that decodes the code knows WHICH display it sees.</summary>
     readonly string _id = Guid.NewGuid().ToString("N").Substring(0, 8);
@@ -64,8 +64,21 @@
         if (text == null || !text.StartsWith(StimulusChannel.CommandPrefix, StringComparison.Ordinal)) return;
         var parts = text.Substring(StimulusChannel.CommandPrefix.Length).Split(' ', StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length == 0) return;
+        // "cmd:@<id> verb ..." is for ONE window; every other window ignores it. Without the prefix a command is for all of them.
+        if (parts[0].StartsWith('@'))
+        {
+            if (parts[0].Substring(1) != _id) return;
+            parts = parts.Skip(1).ToArray();
+            if (parts.Length == 0) return;
+        }
         switch (parts[0])
         {
+            case "close": // the window closes itself (allowed: this window was opened by script)
+                {
+                    using var window = JS.Get<Window>("window");
+                    window.Close();
+                    return;
+                }
             case "fill" when parts.Length == 4:
                 _background = $"rgb({parts[1]}, {parts[2]}, {parts[3]})";
                 break;
@@ -73,7 +86,10 @@
                 _showInfo = parts[1] != "0";
                 break;
             case "px" when parts.Length == 6:
-                _pixels.Add(new Pixel(int.Parse(parts[1]), int.Parse(parts[2]), $"rgb({parts[3]}, {parts[4]}, {parts[5]})"));
+                _pixels.Add(new Pixel(int.Parse(parts[1]), int.Parse(parts[2]), 1, 1, $"rgb({parts[3]}, {parts[4]}, {parts[5]})"));
+                break;
+            case "rect" when parts.Length == 8: // cmd:rect x y width height r g b
+                _pixels.Add(new Pixel(int.Parse(parts[1]), int.Parse(parts[2]), int.Parse(parts[3]), int.Parse(parts[4]), $"rgb({parts[5]}, {parts[6]}, {parts[7]})"));
                 break;
             case "qr" when parts.Length == 2:
                 if (parts[1] == "0") _qrPath = null;

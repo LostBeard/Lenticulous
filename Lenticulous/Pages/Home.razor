@@ -95,6 +95,23 @@
 
     <div class="panel">
         <h2>3. Stimulus window</h2>
+        <p class="muted">
+            Stimulus windows heard from: @(string.Join(", ", LiveStimulusIds()).Length == 0 ? "none" : string.Join(", ", LiveStimulusIds())).
+            Commands go to: <b>@(_targetId == "" ? "all windows" : _targetId)</b>
+        </p>
+        @foreach (var liveId in LiveStimulusIds())
+        {
+            var useId = liveId;
+            <button @onclick="() => _targetId = useId">Use @useId</button>
+        }
+        <button @onclick='() => _targetId = ""'>Use all</button>
+        <button @onclick='() => Stimulus("close")'>Close the target window</button>
+        <button @onclick="ReadCodeAsync" disabled="@_busy">Read the ID code now (no movement)</button>
+        @if (_readCodeText != "")
+        {
+            <pre>@_readCodeText</pre>
+        }
+        <br />
         <button @onclick='() => Stimulus("fill 255 255 255")'>White</button>
         <button @onclick='() => Stimulus("fill 0 0 0")'>Black</button>
         <button @onclick='() => Stimulus("info 0")'>Hide info</button>
@@ -115,6 +132,14 @@
         </div>
         <button @onclick="LightSubPixel">Light this sub-pixel (all others off)</button>
         <button @onclick='() => Stimulus("clear")'>Clear</button>
+        <p class="muted">Probes read the robot camera (connect video first, do not move the robot):</p>
+        <button @onclick="ProbeNoiseAsync" disabled="@_busy">Probe: noise floor</button>
+        <button @onclick="ProbePatchAsync" disabled="@_busy">Probe: white 24x24 patch</button>
+        <button @onclick="ProbeSubPixelAsync" disabled="@_busy">Probe: this sub-pixel</button>
+        @if (_probeText != "")
+        {
+            <pre>@_probeText</pre>
+        }
         @if (_stimulusStatus == null)
         {
             <p class="muted">No stimulus window reporting yet.</p>
@@ -264,10 +289,68 @@
         _codeText = string.Join("\n", rows);
     });
 
-    void Stimulus(string command) => _channel?.PostMessage(StimulusChannel.CommandPrefix + command);
+    /// <summary>The stimulus window commands go to. Empty means every window (all of them obey).</summary>
+    string _targetId = "";
+
+    void Stimulus(string command)
+        => _channel?.PostMessage(StimulusChannel.CommandPrefix + (_targetId == "" ? "" : "@" + _targetId + " ") + command);
+
+    /// <summary>Stimulus windows heard from in the last few seconds (a window reports about twice a second).</summary>
+    List<string> LiveStimulusIds() => _stimulusIds.Where(kv => (DateTime.Now - kv.Value).TotalSeconds < 4).Select(kv => kv.Key).OrderBy(i => i).ToList();
+
+    /// <summary>Decode the camera picture right now, without moving anything, and say which stimulus window it shows.</summary>
+    string _readCodeText = "";
+    Task ReadCodeAsync() => RunRobotAsync(() =>
+    {
+        var r = Robot.TryDecodeQr();
+        var id = r.Text != null && r.Text.StartsWith(StimulusChannel.QrPayloadPrefix, StringComparison.Ordinal) ? r.Text.Substring(StimulusChannel.QrPayloadPrefix.Length) : null;
+        _readCodeText = r.Text == null ? $"no code in the picture ({r.Width}x{r.Height}, {r.DecodeMs:0} ms)"
+            : $"camera sees code \"{r.Text}\" ({r.DecodeMs:0} ms): " + (id != null && _stimulusIds.ContainsKey(id) ? $"stimulus window {id}" : "not a known stimulus window");
+        return Task.CompletedTask;
+    });
 
     int _subX = 100, _subY = 100;
     int _subChannel; // 0 red, 1 green, 2 blue
+    string _probeText = "";
+
+    string SubPixelRgb() => _subChannel switch { 0 => "255 0 0", 1 => "0 255 0", _ => "0 0 255" };
+    string SubPixelName() => _subChannel switch { 0 => "red", 1 => "green", _ => "blue" };
+
+    // EXPERIMENT: how much light does a lit sub-pixel give this camera? Dark frames, lit frames, and the difference.
+    Task ProbeNoiseAsync() => RunRobotAsync(() => ProbeAsync("noise floor (dark vs dark, nothing lit)", () => { }));
+    Task ProbePatchAsync() => RunRobotAsync(() => ProbeAsync("white 24x24 patch at (400,300)", () => Stimulus("rect 400 300 24 24 255 255 255")));
+    Task ProbeSubPixelAsync() => RunRobotAsync(() => ProbeAsync($"one {SubPixelName()} sub-pixel at ({_subX},{_subY})", () => Stimulus($"px {_subX} {_subY} {SubPixelRgb()}")));
+
+    async Task ProbeAsync(string label, Action light)
+    {
+        _probeText = $"{label}: darkening the screen...";
+        StateHasChanged();
+        Stimulus("info 0");
+        Stimulus("clear");
+        await Task.Delay(1500); // the camera's auto-exposure settles on the dark screen
+        var dark = await Robot.CaptureAveragedAsync(12, 40);
+        if (dark == null) { _probeText = "no video yet: press Connect video first"; return; }
+        _probeText = $"{label}: lighting it...";
+        StateHasChanged();
+        light();
+        await Task.Delay(900);
+        var lit = await Robot.CaptureAveragedAsync(12, 40);
+        Stimulus("clear");
+        var (w, h) = Robot.ProbeSize;
+        var report = FrameDifference.Analyze(dark, lit!, w, h);
+        static string Mean(float[] f, int c) { double s = 0; for (int i = c; i < f.Length; i += 3) s += f[i]; return (s / (f.Length / 3)).ToString("0.0"); }
+        var lines = new List<string>
+        {
+            label,
+            $"frames {w}x{h}, 12 averaged per capture; mean RGB dark {Mean(dark, 0)}/{Mean(dark, 1)}/{Mean(dark, 2)}, lit {Mean(lit!, 0)}/{Mean(lit!, 1)}/{Mean(lit!, 2)}",
+            $"noise sigma of the difference (robust): {report.NoiseStd:0.000}",
+        };
+        var channelNames = new[] { "R", "G", "B" };
+        foreach (var p in report.Peaks)
+            lines.Add($"  peak at camera pixel ({p.X},{p.Y}) channel {channelNames[p.Channel]}: +{p.Value:0.00} = {(report.NoiseStd > 0 ? p.Value / report.NoiseStd : 0):0.0} sigma");
+        lines.Add($"strongest peak over noise: {report.SignalToNoise:0.0}");
+        _probeText = string.Join("\n", lines);
+    }
 
     /// <summary>
     /// Black screen, then exactly one colour channel of one pixel at full brightness: one sub-pixel lit, every neighbour off. The
@@ -277,8 +360,7 @@
     {
         Stimulus("info 0");
         Stimulus("clear");
-        var rgb = _subChannel switch { 0 => "255 0 0", 1 => "0 255 0", _ => "0 0 255" };
-        Stimulus($"px {_subX} {_subY} {rgb}");
+        Stimulus($"px {_subX} {_subY} {SubPixelRgb()}");
     }
 
     string _poseText = "";

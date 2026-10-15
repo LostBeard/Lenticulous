@@ -108,6 +108,49 @@ public sealed class RobotService : IAsyncDisposable
     }
 
     HTMLCanvasElement? _grab;
+    HTMLCanvasElement? _probeCanvas;
+
+    /// <summary>Width and height of the frames <see cref="CaptureAveragedAsync"/> returns.</summary>
+    public (int Width, int Height) ProbeSize { get; private set; }
+
+    /// <summary>
+    /// EXPERIMENT ONLY - a measurement path, not the production one. Averages <paramref name="frames"/> full-resolution camera
+    /// frames into one RGB float image (interleaved, <c>width * height * 3</c>) so a single lit sub-pixel can be told from sensor
+    /// noise. Every frame crosses into .NET as a byte array (3.7 MB at 720p), which Rule 4 forbids for production: the real scan
+    /// reduces on the GPU (a WebGPU texture straight from the video frame). This exists to MEASURE how much light one sub-pixel
+    /// gives the camera, which decides how that GPU path must be built.
+    /// </summary>
+    public async Task<float[]?> CaptureAveragedAsync(int frames, int spacingMs)
+    {
+        if (_video == null || _video.VideoWidth == 0) return null;
+        int w = _video.VideoWidth, h = _video.VideoHeight;
+        if (_probeCanvas == null)
+        {
+            using var document = _js.Get<Document>("document");
+            _probeCanvas = document.CreateElement<HTMLCanvasElement>("canvas");
+        }
+        if (_probeCanvas.Width != w) _probeCanvas.Width = w;
+        if (_probeCanvas.Height != h) _probeCanvas.Height = h;
+        ProbeSize = (w, h);
+        var sum = new float[w * h * 3];
+        for (int f = 0; f < frames; f++)
+        {
+            await Task.Delay(spacingMs); // let the next camera frame arrive (about 33 ms apart at 30 fps)
+            using var ctx = _probeCanvas.Get2DContext(new CanvasRenderingContext2DSettings { WillReadFrequently = true });
+            ctx.DrawImage(_video, 0, 0, w, h);
+            using var image = ctx.GetImageData(0, 0, w, h);
+            using var data = image.Data;
+            var rgba = data.ToArray();
+            for (int p = 0, i = 0, j = 0; p < w * h; p++, i += 4, j += 3)
+            {
+                sum[j] += rgba[i];
+                sum[j + 1] += rgba[i + 1];
+                sum[j + 2] += rgba[i + 2];
+            }
+        }
+        for (int i = 0; i < sum.Length; i++) sum[i] /= frames;
+        return sum;
+    }
 
     /// <summary>
     /// Try to read a display ID code (QR) from the current camera picture.
@@ -191,6 +234,8 @@ public sealed class RobotService : IAsyncDisposable
         _meter = null;
         _grab?.Dispose();
         _grab = null;
+        _probeCanvas?.Dispose();
+        _probeCanvas = null;
         _track = null;
         TrackInfo = "no video track yet";
         LinkState = "not connected";

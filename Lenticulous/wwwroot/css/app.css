@@ -60,7 +60,7 @@ tr.sel td { background: #223347; }
 /* stimulus window: pure black, no scrollbars, nothing but the stimulus */
 .stimulus { position: fixed; inset: 0; background: #000; overflow: hidden; cursor: none; }
 .stimulus-qr { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); }
-.stimulus-px { position: absolute; width: 1px; height: 1px; }
+.stimulus-px { position: absolute; }
 .stimulus-info {
     position: fixed; left: 8px; top: 8px;
     font: 13px/1.4 ui-monospace, Consolas, monospace;
