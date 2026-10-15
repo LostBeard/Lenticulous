@@ -101,6 +101,20 @@
         <button @onclick='() => Stimulus("info 1")'>Show info</button>
         <button @onclick='() => Stimulus("qr 1")'>Show ID code</button>
         <button @onclick='() => Stimulus("qr 0")'>Hide ID code</button>
+        <div class="form">
+            <label>Pixel X (stimulus window) <input type="number" @bind="_subX" /></label>
+            <label>Pixel Y <input type="number" @bind="_subY" /></label>
+            <label>
+                Colour channel
+                <select @bind="_subChannel">
+                    <option value="0">Red</option>
+                    <option value="1">Green</option>
+                    <option value="2">Blue</option>
+                </select>
+            </label>
+        </div>
+        <button @onclick="LightSubPixel">Light this sub-pixel (all others off)</button>
+        <button @onclick='() => Stimulus("clear")'>Clear</button>
         @if (_stimulusStatus == null)
         {
             <p class="muted">No stimulus window reporting yet.</p>
@@ -251,6 +265,21 @@
     });
 
     void Stimulus(string command) => _channel?.PostMessage(StimulusChannel.CommandPrefix + command);
+
+    int _subX = 100, _subY = 100;
+    int _subChannel; // 0 red, 1 green, 2 blue
+
+    /// <summary>
+    /// Black screen, then exactly one colour channel of one pixel at full brightness: one sub-pixel lit, every neighbour off. The
+    /// coordinates are the stimulus window's own (CSS pixels, which are panel pixels at scale 1).
+    /// </summary>
+    void LightSubPixel()
+    {
+        Stimulus("info 0");
+        Stimulus("clear");
+        var rgb = _subChannel switch { 0 => "255 0 0", 1 => "0 255 0", _ => "0 0 255" };
+        Stimulus($"px {_subX} {_subY} {rgb}");
+    }
 
     string _poseText = "";
     string _sweepText = "";
