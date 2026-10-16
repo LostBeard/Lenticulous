@@ -309,6 +309,48 @@ public class ScanLogicTests
         Check(Math.Abs(sums[0]) < 5 && Math.Abs(sums[2]) < 5, $"other channels {sums[0]:0.0}/{sums[2]:0.0}, expected 0 (the +3 shift removed)");
     }
 
+    // The brightness a camera would read at each marker block for a sequence number, with its own black/white level and noise.
+    private static double[] MarkerReading(int sequence, double black, double white, double noise, Random rng)
+    {
+        var bits = SyncMarker.Bits(sequence);
+        var reading = new double[SyncMarker.BlockCount];
+        reading[0] = black + (rng.NextDouble() * 2 - 1) * noise;
+        reading[1] = white + (rng.NextDouble() * 2 - 1) * noise;
+        for (int i = 0; i < SyncMarker.BitCount; i++) reading[2 + i] = (bits[i] ? white : black) + (rng.NextDouble() * 2 - 1) * noise;
+        return reading;
+    }
+
+    [TestMethod]
+    public void SyncMarker_EverySequenceNumberRoundTripsAtAnyExposure()
+    {
+        var rng = new Random(9);
+        foreach (var (black, white) in new[] { (5.0, 250.0), (30.0, 120.0), (60.0, 130.0) })
+            for (int n = 1; n <= SyncMarker.MaxSequence; n++)
+            {
+                var got = SyncMarker.Decode(MarkerReading(n, black, white, 8, rng));
+                Check(got == n, $"sequence {n} at black {black} white {white} decoded as {got?.ToString() ?? "null"}");
+            }
+    }
+
+    [TestMethod]
+    public void SyncMarker_RefusesWhatIsNotAMarker()
+    {
+        var rng = new Random(4);
+        // A blank screen: both references black. Nothing in view: no contrast. A frame caught half way: a bit mid-grey.
+        Check(SyncMarker.Decode(new double[SyncMarker.BlockCount]) == null, "a blank picture decoded as a number");
+        Check(SyncMarker.Decode(Enumerable.Repeat(100.0, SyncMarker.BlockCount).ToArray()) == null, "a flat picture decoded as a number");
+        var half = MarkerReading(77, 10, 240, 2, rng);
+        half[5] = 125; // a bit caught half way between black and white
+        Check(SyncMarker.Decode(half) == null, "a half-way bit decoded as a number");
+        var allBlack = MarkerReading(1, 10, 240, 2, rng);
+        for (int i = 2; i < allBlack.Length; i++) allBlack[i] = 10;
+        Check(SyncMarker.Decode(allBlack) == null, "all-black bits decoded as a number (that is sequence 0, which is not used)");
+        // And a different number must never be read as this one: flip one bit and the decode must differ.
+        var a = SyncMarker.Decode(MarkerReading(100, 10, 240, 2, rng));
+        var b = SyncMarker.Decode(MarkerReading(101, 10, 240, 2, rng));
+        Check(a == 100 && b == 101, $"neighbouring numbers decoded as {a} and {b}");
+    }
+
     [TestMethod]
     public void BlobCentroid_FindsAPatchAndItsCentre()
     {

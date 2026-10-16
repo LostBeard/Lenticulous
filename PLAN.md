@@ -269,3 +269,37 @@ camera position (radius 4, 6 frames averaged, 27 s in total). The profile is bim
 and 23 give 8700 to 12050, the rest 600 to 4600 (mostly under 1500). The bright ones recur about every 4.5 sub-pixels, so this
 camera position sits inside one view and the view repeats about every 4.5 sub-pixels. Moving the camera sideways moves which
 sub-pixels are bright; that is the scan the view assignment is built on.
+
+## Measured: the row from five head positions (2026-10-15)
+
+Head Y read back as -10.0, -8.1, -3.9, +1.9 and +8.6 mm (commands -12 to +12; the mechanism is compliant and the head yaw/pitch
+drift with it). Region sums of the lit channel, in hundreds, sub-pixels 0..23 of the row (pixels 828..835, R G B each):
+
+| head Y | profile |
+|---|---|
+| -10.0 | 58 9 6 15 112 10 7 9 14 113 13 3 9 91 42 9 7 7 118 26 2 9 30 85 |
+| -8.1 | 82 9 2 12 112 15 9 8 12 115 16 6 8 70 66 9 7 9 110 35 4 8 21 89 |
+| -3.9 | 108 12 2 8 85 40 8 7 9 115 21 4 7 26 86 12 7 1 82 88 3 7 13 86 |
+| +1.9 | 115 25 2 7 28 83 11 7 5 81 86 4 5 14 87 19 7 4 17 117 7 7 9 44 |
+| +8.6 | 77 91 2 6 15 5 23 8 5 18 118 6 7 9 46 97 11 3 12 110 0 -1 7 10 |
+
+The bright set moves by about one sub-pixel over 19 mm, and 12 of the 24 sub-pixels stay dark at every position: the head's
+sideways travel at about 19 cm covers only part of the view fan. More lateral travel is needed (closer robot, body yaw, or both).
+
+## Timing: draw a marker in the same frame (TJ, 2026-10-15)
+
+The camera/link latency is unknown and not constant, so a fixed delay after lighting a sub-pixel is a guess. The stimulus draws a
+row of blocks in the SAME frame as the lit pixel (a black and a white reference, then an 8-bit sequence number). When the camera
+reads that number the sub-pixel is on, even when it is too faint to see.
+
+## Measured: the sync marker (2026-10-15)
+
+Each stimulus frame carries a marker (a never-drawn black reference block, a white reference block, then an 8-bit sequence number)
+drawn in the same render as the lit pixel. The camera polls the marker with a small region read and proceeds when it decodes the
+number just sent. Over a 24 sub-pixel row scan (26 frames incl. dark frames) the marker was read after 194 / 237 / 285 ms
+(min / median / max), never missed, and never changed during a capture; the scan took 19 s instead of 65 s with fixed 700 ms
+waits. After the marker is read a 120 ms settle covers the camera exposing across the change and the LCD's response.
+
+Caveat found on the way: the pixel profile depends on the stimulus window's origin on the panel (a new windowed popup read a
+different profile from the fullscreen window), so scans are only comparable inside one window state; the origin has to be fixed
+(fullscreen) and recorded with every scan.

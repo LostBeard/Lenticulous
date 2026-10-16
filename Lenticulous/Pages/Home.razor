@@ -73,6 +73,11 @@
         <button @onclick="ShowPoseAsync" disabled="@_busy">Read pose</button>
         <button @onclick="FindDisplayAsync" disabled="@_busy">Find display (turns the robot)</button>
         <button @onclick="FindDisplayByCodeAsync" disabled="@_busy">Find display by ID code</button>
+        <div class="form">
+            <label>Head X (mm) <input type="number" step="any" @bind="_headX" /></label>
+            <label>Head Y (mm) <input type="number" step="any" @bind="_headY" /></label>
+        </div>
+        <button @onclick="MoveHeadAsync" disabled="@_busy">Move head to X / Y (moves the robot)</button>
         @if (_codeText != "")
         {
             <pre>@_codeText</pre>
@@ -143,6 +148,14 @@
         <button @onclick="CalibrateAsync" disabled="@_busy">Calibrate (9 white patches)</button>
         <button @onclick="LocateSubPixelsAsync" disabled="@_busy">Locate R, G, B sub-pixels of this pixel</button>
         <button @onclick="ScanRowAsync" disabled="@_busy">Scan a row of 8 pixels from here</button>
+        <div class="form">
+            <label>Head Y positions (mm, comma separated) <input type="text" @bind="_headYList" /></label>
+        </div>
+        <button @onclick="ScanPositionsAsync" disabled="@_busy">Scan the row at each head position (moves the robot)</button>
+        @if (_positionsText != "")
+        {
+            <pre>@_positionsText</pre>
+        }
         @if (_rowText != "")
         {
             <pre>@_rowText</pre>
@@ -371,7 +384,10 @@
     // by its centre of light, then a projective fit stimulus -> camera.
     Homography? _calib;
     string _calibText = "";
-    Task CalibrateAsync() => RunRobotAsync(async () =>
+    Task CalibrateAsync() => RunRobotAsync(() => DoCalibrateAsync(new[] { 200, 832, 1460 }, new[] { 150, 436, 722 }));
+
+    /// <summary>Nine patches on the given grid; true when at least four were seen and the fit is stored in <c>_calib</c>.</summary>
+    async Task<bool> DoCalibrateAsync(int[] gridX, int[] gridY)
     {
         _calibText = "calibrating: darkening...";
         StateHasChanged();
@@ -379,14 +395,14 @@
         Stimulus("clear");
         await Task.Delay(1500);
         var dark = await Robot.CaptureAveragedAsync(12, 40);
-        if (dark == null) { _calibText = "no video yet: press Connect video first"; return; }
+        if (dark == null) { _calibText = "no video yet: press Connect video first"; return false; }
         var (w, h) = Robot.ProbeSize;
         var from = new List<(double X, double Y)>();
         var to = new List<(double X, double Y)>();
         var peaks = new List<FrameDifference.Blob>();
         var lines = new List<string>();
-        foreach (var y in new[] { 150, 436, 722 })
-            foreach (var x in new[] { 200, 832, 1460 })
+        foreach (var y in gridY)
+            foreach (var x in gridX)
             {
                 Stimulus("clear");
                 Stimulus($"rect {x - 12} {y - 12} 24 24 255 255 255");
@@ -414,13 +430,14 @@
                     from.RemoveAt(i); to.RemoveAt(i); peaks.RemoveAt(i);
                 }
         }
-        if (from.Count < 4) { lines.Add($"only {from.Count} patches seen: cannot fit"); _calibText = string.Join("\n", lines); return; }
+        if (from.Count < 4) { lines.Add($"only {from.Count} patches seen: cannot fit"); _calibText = string.Join("\n", lines); return false; }
         _calib = Homography.Fit(from, to);
-        var (ax, ay) = _calib.Map(832, 436);
-        var (bx, by) = _calib.Map(833, 437);
-        lines.Add($"fit from {from.Count} patches, RMS residual {_calib.RmsError(from, to):0.00} camera px; one stimulus pixel = {bx - ax:0.00} x {by - ay:0.00} camera px at the centre");
+        var (ax, ay) = _calib.Map(from[0].X, from[0].Y);
+        var (bx, by) = _calib.Map(from[0].X + 1, from[0].Y + 1);
+        lines.Add($"fit from {from.Count} patches, RMS residual {_calib.RmsError(from, to):0.00} camera px; one stimulus pixel = {bx - ax:0.00} x {by - ay:0.00} camera px");
         _calibText = string.Join("\n", lines);
-    });
+        return true;
+    }
 
     // Where does a lit sub-pixel show up, and does it stand out? Each colour channel of the pixel is lit in turn; the predicted
     // camera position is searched, and the same place is searched in a dark-versus-dark control taken at the same moment.
@@ -461,17 +478,66 @@
     // predicted camera position. One camera position's view profile along a stretch of the panel.
     string _rowText = "";
     double[]? _rowProfile;
-    Task ScanRowAsync() => RunRobotAsync(async () =>
+    Task ScanRowAsync() => RunRobotAsync(() => DoRowScanAsync());
+
+    // SYNC MARKER (TJ's method): every frame the stimulus shows carries a numbered marker, drawn in the same render as the lit pixel.
+    // The camera polls the marker; when it reads the number just sent, the pixel is on, whatever the link's latency.
+    int _seq;
+    readonly List<int> _latenciesMs = new();
+    int _markerMisses, _markerChanged;
+
+    /// <summary>Camera-picture centres of the marker's blocks (needs the calibration), black reference first.</summary>
+    List<(double X, double Y)> MarkerCentres(int mx, int my)
+        => Enumerable.Range(0, SyncMarker.BlockCount)
+            .Select(i => _calib!.Map(mx + i * SyncMarker.BlockPitch + SyncMarker.BlockSize / 2.0, my + SyncMarker.BlockSize / 2.0)).ToList();
+
+    /// <summary>
+    /// Show one frame: the marker with the next sequence number, plus the pixel (pixelX &lt; 0: nothing lit). Returns once the camera
+    /// has read that number, with the milliseconds it took, or -1 when it never did.
+    /// </summary>
+    async Task<int> ShowFrameAsync(int pixelX, int pixelY, string rgb)
     {
-        if (_calib == null) { _rowText = "calibrate first"; return; }
+        _seq = _seq % SyncMarker.MaxSequence + 1;
+        int mx = _subX - 100, my = _subY - 70;
+        var centres = MarkerCentres(mx, my);
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        Stimulus($"frame {_seq} {mx} {my} {pixelX} {pixelY} {rgb}");
+        while (clock.ElapsedMilliseconds < 3000)
+        {
+            await Task.Delay(20);
+            var luma = Robot.SampleLuma(centres, 3);
+            if (luma != null && SyncMarker.Decode(luma) == _seq)
+            {
+                _latenciesMs.Add((int)clock.ElapsedMilliseconds);
+                return (int)clock.ElapsedMilliseconds;
+            }
+        }
+        _markerMisses++;
+        return -1;
+    }
+
+    /// <summary>True when the camera still reads the marker of the last frame shown (the picture it just averaged was that frame).</summary>
+    bool MarkerStillShown()
+    {
+        var luma = Robot.SampleLuma(MarkerCentres(_subX - 100, _subY - 70), 3);
+        var still = luma != null && SyncMarker.Decode(luma) == _seq;
+        if (!still) _markerChanged++;
+        return still;
+    }
+
+    /// <summary>One row of 8 pixels from (_subX,_subY) at the current pose; null when it cannot run.</summary>
+    async Task<double[]?> DoRowScanAsync()
+    {
+        if (_calib == null) { _rowText = "calibrate first"; return null; }
         const int pixels = 8;
         _rowText = "row scan: darkening...";
         StateHasChanged();
         Stimulus("info 0");
-        Stimulus("clear");
-        await Task.Delay(1500);
+        _latenciesMs.Clear(); _markerMisses = 0; _markerChanged = 0;
+        if (await ShowFrameAsync(-1, 0, "0 0 0") < 0) { _rowText = "the camera never read the sync marker (is the marker in view and the calibration good?)"; return null; }
+        await Task.Delay(400); // the camera's auto-exposure settles on the dark frame
         var dark = await Robot.CaptureAveragedAsync(12, 40);
-        if (dark == null) { _rowText = "no video yet"; return; }
+        if (dark == null) { _rowText = "no video yet"; return null; }
         var (w, h) = Robot.ProbeSize;
         var values = new double[pixels * 3];
         var started = DateTime.Now;
@@ -479,23 +545,63 @@
         {
             int px = _subX + i / 3, c = i % 3;
             var (cx, cy) = _calib.Map(px + (c + 0.5) / 3.0, _subY + 0.5);
-            Stimulus($"px {px} {_subY} {(c == 0 ? "255 0 0" : c == 1 ? "0 255 0" : "0 0 255")}");
-            await Task.Delay(700);
+            // The marker says the frame is up; a short settle covers the camera exposing across the change and the LCD's response.
+            if (await ShowFrameAsync(px, _subY, c == 0 ? "255 0 0" : c == 1 ? "0 255 0" : "0 0 255") < 0) { values[i] = double.NaN; continue; }
+            await Task.Delay(120);
             var lit = await Robot.CaptureAveragedAsync(6, 40);
-            Stimulus("clear");
-            values[i] = FrameDifference.RegionChannelSums(dark, lit!, w, h, 3, cx, cy, 4)[c];
+            var valid = MarkerStillShown();
+            values[i] = valid ? FrameDifference.RegionChannelSums(dark, lit!, w, h, 3, cx, cy, 4)[c] : double.NaN;
             _rowText = $"row scan: sub-pixel {i + 1} of {pixels * 3}...";
             StateHasChanged();
         }
+        Stimulus("clear");
         // The same dark frame again at the end: how far the baseline drifted while scanning.
+        await ShowFrameAsync(-1, 0, "0 0 0");
+        await Task.Delay(400);
         var dark2 = await Robot.CaptureAveragedAsync(12, 40);
         var drift = FrameDifference.RegionChannelSums(dark, dark2!, w, h, 3, _calib.Map(_subX + 0.5, _subY + 0.5).X, _calib.Map(_subX + 0.5, _subY + 0.5).Y, 4);
         _rowProfile = values;
-        var max = values.Max();
-        var lines = new List<string> { $"row scan at y={_subY}, pixels {_subX}..{_subX + pixels - 1}, {(DateTime.Now - started).TotalSeconds:0} s; region sum of the lit channel (camera counts); end-of-scan dark drift R/G/B {drift[0]:0}/{drift[1]:0}/{drift[2]:0}" };
+        var max = values.Where(v => !double.IsNaN(v)).DefaultIfEmpty(1).Max();
+        var sorted = _latenciesMs.OrderBy(v => v).ToList();
+        var latency = sorted.Count == 0 ? "no marker read" : $"marker read after {sorted[0]} / {sorted[sorted.Count / 2]} / {sorted[^1]} ms (min / median / max over {sorted.Count} frames)";
+        var lines = new List<string>
+        {
+            $"row scan at y={_subY}, pixels {_subX}..{_subX + pixels - 1}, {(DateTime.Now - started).TotalSeconds:0} s; region sum of the lit channel (camera counts); end-of-scan dark drift R/G/B {drift[0]:0}/{drift[1]:0}/{drift[2]:0}",
+            $"sync: {latency}; never seen {_markerMisses}; marker changed during a capture {_markerChanged} (those points are blank)",
+        };
         for (int i = 0; i < values.Length; i++)
-            lines.Add($"  px {_subX + i / 3} {"RGB"[i % 3]} {values[i],7:0}  {new string('#', Math.Max(0, (int)Math.Round(values[i] / max * 40)))}");
+            lines.Add(double.IsNaN(values[i])
+                ? $"  px {_subX + i / 3} {"RGB"[i % 3]}   (no valid reading)"
+                : $"  px {_subX + i / 3} {"RGB"[i % 3]} {values[i],7:0}  {new string('#', Math.Max(0, (int)Math.Round(values[i] / max * 40)))}");
         _rowText = string.Join("\n", lines);
+        return values;
+    }
+
+    // SEVERAL CAMERA POSITIONS: for each head Y (mm) in the list the head moves, a local calibration (9 patches around the row)
+    // re-finds the display in the picture, and the row is scanned. The profiles are what the view assignment is built from.
+    string _headYList = "-12,-6,0,6,12";
+    string _positionsText = "";
+    readonly List<(double HeadY, string Pose, double[] Profile)> _positionProfiles = new();
+    Task ScanPositionsAsync() => RunRobotAsync(async () =>
+    {
+        _positionProfiles.Clear();
+        var lines = new List<string>();
+        foreach (var token in _headYList.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (!double.TryParse(token, System.Globalization.CultureInfo.InvariantCulture, out var y)) continue;
+            _positionsText = string.Join("\n", lines) + $"\nhead Y {y}: moving...";
+            StateHasChanged();
+            await Robot.MoveHeadAsync(_robotAddress, _headX, y);
+            var pose = await Robot.PoseTextAsync(_robotAddress);
+            var ok = await DoCalibrateAsync(new[] { _subX - 130, _subX, _subX + 130 }, new[] { _subY - 100, _subY, _subY + 100 });
+            if (!ok) { lines.Add($"head Y {y}: {pose}: calibration failed"); continue; }
+            var profile = await DoRowScanAsync();
+            if (profile == null) { lines.Add($"head Y {y}: scan failed"); continue; }
+            _positionProfiles.Add((y, pose, profile));
+            lines.Add($"head Y {y}: {pose}");
+            lines.Add("   " + string.Join(" ", profile.Select(v => double.IsNaN(v) ? "  ?" : ((int)Math.Round(v / 100)).ToString().PadLeft(3))) + "   (hundreds, sub-pixels R G B per pixel; ? = no valid reading)");
+        }
+        _positionsText = string.Join("\n", lines);
     });
 
     /// <summary>
@@ -513,6 +619,14 @@
     string _sweepText = "";
 
     Task ShowPoseAsync() => RunRobotAsync(async () => _poseText = await Robot.PoseTextAsync(_robotAddress));
+
+    // Head position (mm, the daemon's head frame). The camera is on the head, so this is the sideways travel the scan needs.
+    double _headX, _headY;
+    Task MoveHeadAsync() => RunRobotAsync(async () =>
+    {
+        await Robot.MoveHeadAsync(_robotAddress, _headX, _headY);
+        _poseText = await Robot.PoseTextAsync(_robotAddress);
+    });
 
     /// <summary>
     /// Turn the robot in steps and read the picture's brightness at each: the white stimulus window is the brightest

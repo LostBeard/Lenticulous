@@ -153,6 +153,47 @@ public sealed class RobotService : IAsyncDisposable
     }
 
     /// <summary>
+    /// Mean brightness (0-255 luma) of a small square around each point of the CURRENT camera frame. Only the rectangle that holds
+    /// the points crosses into .NET, so this is cheap enough to poll for the sync marker. EXPERIMENT PATH like the capture above.
+    /// </summary>
+    public double[]? SampleLuma(IReadOnlyList<(double X, double Y)> centres, int radius)
+    {
+        if (_video == null || _video.VideoWidth == 0 || centres.Count == 0) return null;
+        int w = _video.VideoWidth, h = _video.VideoHeight;
+        if (_probeCanvas == null)
+        {
+            using var document = _js.Get<Document>("document");
+            _probeCanvas = document.CreateElement<HTMLCanvasElement>("canvas");
+        }
+        if (_probeCanvas.Width != w) _probeCanvas.Width = w;
+        if (_probeCanvas.Height != h) _probeCanvas.Height = h;
+        int x0 = Math.Max(0, (int)Math.Floor(centres.Min(c => c.X)) - radius), x1 = Math.Min(w - 1, (int)Math.Floor(centres.Max(c => c.X)) + radius);
+        int y0 = Math.Max(0, (int)Math.Floor(centres.Min(c => c.Y)) - radius), y1 = Math.Min(h - 1, (int)Math.Floor(centres.Max(c => c.Y)) + radius);
+        if (x1 < x0 || y1 < y0) return null;
+        int bw = x1 - x0 + 1, bh = y1 - y0 + 1;
+        using var ctx = _probeCanvas.Get2DContext(new CanvasRenderingContext2DSettings { WillReadFrequently = true });
+        ctx.DrawImage(_video, 0, 0, w, h);
+        using var image = ctx.GetImageData(x0, y0, bw, bh);
+        using var data = image.Data;
+        var rgba = data.ToArray();
+        var result = new double[centres.Count];
+        for (int k = 0; k < centres.Count; k++)
+        {
+            int cx = (int)Math.Floor(centres[k].X), cy = (int)Math.Floor(centres[k].Y);
+            double sum = 0; int n = 0;
+            for (int y = Math.Max(y0, cy - radius); y <= Math.Min(y1, cy + radius); y++)
+                for (int x = Math.Max(x0, cx - radius); x <= Math.Min(x1, cx + radius); x++)
+                {
+                    int i = ((y - y0) * bw + (x - x0)) * 4;
+                    sum += 0.299 * rgba[i] + 0.587 * rgba[i + 1] + 0.114 * rgba[i + 2];
+                    n++;
+                }
+            result[k] = n == 0 ? 0 : sum / n;
+        }
+        return result;
+    }
+
+    /// <summary>
     /// Try to read a display ID code (QR) from the current camera picture.
     /// </summary>
     /// <remarks>
@@ -270,7 +311,20 @@ public sealed class RobotService : IAsyncDisposable
         const double Deg = 180d / Math.PI;
         return head == null
             ? $"body yaw {body * Deg:0.0} deg, head pose unavailable"
-            : $"body yaw {body * Deg:0.0} deg, head yaw {head.Yaw * Deg:0.0}, pitch {head.Pitch * Deg:0.0}, roll {head.Roll * Deg:0.0} deg, z {head.Z * 1000:0.0} mm";
+            : $"body yaw {body * Deg:0.0} deg, head yaw {head.Yaw * Deg:0.0}, pitch {head.Pitch * Deg:0.0}, roll {head.Roll * Deg:0.0} deg, x {head.X * 1000:0.0} y {head.Y * 1000:0.0} z {head.Z * 1000:0.0} mm";
+    }
+
+    /// <summary>
+    /// Move the head's POSITION (millimetres, the daemon's head frame) keeping its orientation and height: the camera sits on the head,
+    /// so this is the lateral camera travel the view scan needs. Waits for the move; the caller reads the pose back, because the
+    /// daemon clamps what the mechanism cannot reach without saying so.
+    /// </summary>
+    public async Task MoveHeadAsync(string host, double xMm, double yMm, double seconds = 1.2)
+    {
+        var client = Client(host);
+        var head = await client.GetHeadPoseAsync() ?? throw new InvalidOperationException("head pose unavailable");
+        await client.GotoAsync(headPose: new XyzRpyPose(xMm / 1000d, yMm / 1000d, head.Z, head.Roll, head.Pitch, head.Yaw), duration: seconds);
+        await Task.Delay((int)(seconds * 1000) + 500);
     }
 
     /// <summary>

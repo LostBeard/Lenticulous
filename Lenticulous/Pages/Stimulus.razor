@@ -91,6 +91,24 @@
             case "rect" when parts.Length == 8: // cmd:rect x y width height r g b
                 _pixels.Add(new Pixel(int.Parse(parts[1]), int.Parse(parts[2]), int.Parse(parts[3]), int.Parse(parts[4]), $"rgb({parts[5]}, {parts[6]}, {parts[7]})"));
                 break;
+            case "frame" when parts.Length == 9: // cmd:frame seq markerX markerY pixelX pixelY r g b  (pixelX < 0: nothing lit)
+                {
+                    // One render: the sync marker and the lit pixel appear in the same display frame, so a camera that reads the
+                    // marker knows the pixel is on too, whatever the latency.
+                    _pixels.Clear();
+                    _background = "#000";
+                    _qrPath = null;
+                    var seq = int.Parse(parts[1]);
+                    int mx = int.Parse(parts[2]), my = int.Parse(parts[3]);
+                    var white = "rgb(255, 255, 255)";
+                    _pixels.Add(new Pixel(mx + SyncMarker.BlockPitch, my, SyncMarker.BlockSize, SyncMarker.BlockSize, white)); // block 1: white reference
+                    var bits = SyncMarker.Bits(seq);
+                    for (var i = 0; i < SyncMarker.BitCount; i++)
+                        if (bits[i]) _pixels.Add(new Pixel(mx + (2 + i) * SyncMarker.BlockPitch, my, SyncMarker.BlockSize, SyncMarker.BlockSize, white));
+                    if (int.Parse(parts[4]) >= 0)
+                        _pixels.Add(new Pixel(int.Parse(parts[4]), int.Parse(parts[5]), 1, 1, $"rgb({parts[6]}, {parts[7]}, {parts[8]})"));
+                    break;
+                }
             case "qr" when parts.Length == 2:
                 if (parts[1] == "0") _qrPath = null;
                 else ShowQr();
