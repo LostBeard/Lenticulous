@@ -343,3 +343,16 @@ other rows), turning phase into view numbers, and the tile/export.
 - **Optics**: the lens inverts the picture: the sub-pixel seen moves to a lower phase when the camera moves right.
 - **What did not work**: camera pose from the calibration homography (unreliable for small moves); body-yaw arc (the camera
   rotates, it hardly translates); head Y gives about 0.45 mm sideways per mm.
+
+## End to end in the app (2026-10-15)
+
+The Home page's "Solve the lens and build the pixel pattern" runs the whole chain from scans made in the same page (they are also
+saved in localStorage, so a lost tab does not lose them): long window -> exact pitch, 8 consecutive rows -> slant, 17 across
+windows -> phase curve and lens centre -> tile -> 3DGM ini. On a fresh live run: pitch 14/3 (the gaps had one stray 5, the tolerant
+detector read it anyway), slant 1/2 (spread 0.115 cycles), phase sweep mean correlation 0.954, camera 154 mm away and straight
+ahead of column 733, zone 26.7 degrees, lens centre phase 0.218, 42 x 28 tile with 8 views (`samples/Philips-22-3D2N11-00.ini`).
+Offline numbers from the earlier scans: distance 150, column 740, centre 0.23.
+
+Not verified: the absolute numbering. The centre phase is good to about +-0.04 (a third of an 8-view bin) and moves 0.075 per 10 mm
+of camera distance, so measuring that distance pins it; and which way view 0 faces needs one look in the renderer (reverse=1
+flips it).

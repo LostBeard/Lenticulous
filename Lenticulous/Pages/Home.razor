@@ -161,6 +161,28 @@
         {
             <pre>@_downText</pre>
         }
+        <h4>Lens solution</h4>
+        <p class="muted">Needs, from this page session: one long window (30 pixels on one row), the same window on 4+ consecutive rows, and 8+ windows across the panel. Stimulus window origin on the panel is as it reports (fullscreen: 0, 56).</p>
+        <div class="form">
+            <label>Window origin X on the panel <input type="number" @bind="_originX" /></label>
+            <label>Window origin Y on the panel <input type="number" @bind="_originY" /></label>
+            <label>Camera distance hint (mm) <input type="number" @bind="_distanceHintMm" /></label>
+            <label>Views in the pattern <input type="number" @bind="_viewCount" /></label>
+        </div>
+        @if (_restoredText != "")
+        {
+            <p class="muted">@_restoredText</p>
+        }
+        <button @onclick="SolveLens">Solve the lens and build the pixel pattern</button>
+        @if (_lensText != "")
+        {
+            <pre>@_lensText</pre>
+        }
+        @if (_iniText != "")
+        {
+            <p class="muted">Pixel pattern (3DGM ini), select all and copy:</p>
+            <textarea readonly rows="12" style="width:100%" @bind="_iniText" @bind:event="oninput"></textarea>
+        }
         <div class="form">
             <label>Body yaws (deg, comma separated) <input type="text" @bind="_bodyYawList" /></label>
         </div>
@@ -283,8 +305,56 @@
     Task WakeAsync() => RunRobotAsync(() => Robot.WakeAsync(_robotAddress));
     Task ParkAsync() => RunRobotAsync(async () => { await Robot.DisconnectVideoAsync(); await Robot.ParkAsync(_robotAddress); });
 
+    // SCAN STORE: a scan takes minutes and a lost tab used to lose all of it, so the scans live in the browser's localStorage too.
+    // (Counts are rounded to whole numbers; a failed reading, NaN, is stored as a sentinel because JSON has no NaN.)
+    const string ScanStoreKey = "lenticulous.scans.v1";
+    const double NanSentinel = -999999;
+    record StoredRow(int Key, double[] Values);
+    record StoredScans(int LongX, int LongY, double[]? Long, int DownX, List<StoredRow> Down, int AcrossY, List<StoredRow> Across, int OriginX, int OriginY);
+    string _restoredText = "";
+
+    static double[] ToStored(double[] v) => v.Select(a => double.IsNaN(a) ? NanSentinel : Math.Round(a)).ToArray();
+    static double[] FromStored(double[] v) => v.Select(a => a <= NanSentinel ? double.NaN : a).ToArray();
+
+    void SaveScans()
+    {
+        try
+        {
+            using var window = JS.Get<Window>("window");
+            using var storage = window.LocalStorage;
+            storage.SetJSON(ScanStoreKey, new StoredScans(
+                _longScan?.X ?? 0, _longScan?.Y ?? 0, _longScan == null ? null : ToStored(_longScan.Value.Values),
+                _downScanX, _downScans.Select(r => new StoredRow(r.Y, ToStored(r.Values))).ToList(),
+                _acrossY, _acrossProfiles.Select(r => new StoredRow(r.X, ToStored(r.Profile))).ToList(),
+                _originX, _originY));
+        }
+        catch (Exception ex) { OnRobotLog($"could not save the scans: {ex.Message}"); }
+    }
+
+    void LoadScans()
+    {
+        try
+        {
+            using var window = JS.Get<Window>("window");
+            using var storage = window.LocalStorage;
+            var s = storage.GetJSON<StoredScans>(ScanStoreKey);
+            if (s == null) return;
+            _longScan = s.Long == null ? null : (s.LongX, s.LongY, FromStored(s.Long));
+            _downScanX = s.DownX;
+            _downScans.Clear();
+            foreach (var r in s.Down) _downScans.Add((r.Key, FromStored(r.Values)));
+            _acrossY = s.AcrossY;
+            _acrossProfiles.Clear();
+            foreach (var r in s.Across) _acrossProfiles.Add((r.Key, FromStored(r.Values)));
+            _originX = s.OriginX; _originY = s.OriginY;
+            _restoredText = $"Restored from this browser: {(_longScan == null ? "no" : "1")} long window, {_downScans.Count} row scans, {_acrossProfiles.Count} across windows.";
+        }
+        catch (Exception ex) { _restoredText = $"could not restore saved scans: {ex.Message}"; }
+    }
+
     protected override void OnInitialized()
     {
+        LoadScans();
         Robot.Log += OnRobotLog;
         _channel = new BroadcastChannel(StimulusChannel.Name);
         _channel.OnMessage += OnStimulusMessage;
@@ -589,6 +659,7 @@
         var driftAt = _calib.Map(xStart + 0.5, _subY + 0.5);
         var drift = FrameDifference.RegionChannelSums(dark, dark2!, w, h, 3, driftAt.X, driftAt.Y, 4);
         _rowProfile = values;
+        if (pixels * 3 >= 45) { _longScan = (xStart, _subY, values); SaveScans(); } // long enough to show the lens lattice
         var max = values.Where(v => !double.IsNaN(v)).DefaultIfEmpty(1).Max();
         var sorted = _latenciesMs.OrderBy(v => v).ToList();
         var latency = sorted.Count == 0 ? "no marker read" : $"marker read after {sorted[0]} / {sorted[sorted.Count / 2]} / {sorted[^1]} ms (min / median / max over {sorted.Count} frames)";
@@ -616,6 +687,7 @@
     async Task DoAcrossAsync()
     {
         _acrossProfiles.Clear();
+        _acrossY = _subY;
         var lines = new List<string> { $"row y={_subY}: windows of {_acrossPixels} pixels ({_acrossPixels * 3} sub-pixels R,G,B) every {_acrossStep} px from x={_acrossX0}; values in hundreds, '#' = over 40% of the window's brightest" };
         for (int j = 0; j < _acrossCount; j++)
         {
@@ -623,6 +695,7 @@
             var profile = await DoRowScanAsync(x, _acrossPixels);
             if (profile == null) { lines.Add($"x={x}: scan failed"); break; }
             _acrossProfiles.Add((x, profile));
+            SaveScans();
             var max = profile.Where(v => !double.IsNaN(v)).DefaultIfEmpty(1).Max();
             lines.Add($"x={x,4}  " + string.Join(" ", profile.Select(v => double.IsNaN(v) ? "  ?" : ((int)Math.Round(v / 100)).ToString().PadLeft(3))));
             lines.Add("        " + string.Join(" ", profile.Select(v => !double.IsNaN(v) && v > max * 0.4 ? "  #" : "  .")));
@@ -630,6 +703,61 @@
             StateHasChanged();
         }
         _acrossText = string.Join("\n", lines);
+    }
+
+    // THE LENS SOLUTION: pitch from the long contiguous scan, slant from consecutive rows, the phase sweep from the across windows,
+    // then the pixel pattern. Everything it uses was scanned in this page session.
+    (int X, int Y, double[] Values)? _longScan;
+    readonly List<(int Y, double[] Values)> _downScans = new();
+    int _downScanX, _acrossY;
+    int _originX = 0, _originY = 56;      // where the stimulus window's pixel (0,0) sits on the panel (the window reports it)
+    double _distanceHintMm = 150;
+    int _viewCount = 8;
+    string _lensText = "";
+    string _iniText = "";
+
+    void SolveLens()
+    {
+        var lines = new List<string>();
+        _iniText = "";
+        if (_longScan == null) { _lensText = "Scan a long window first (30 pixels = 90 sub-pixels: set Pixels per window to 30 and scan one row): the exact pitch comes from it."; return; }
+        var pitch = LensLattice.DetectPitch(_longScan.Value.Values, out var lobes, out var gaps);
+        lines.Add($"1. pitch: long window x={_longScan.Value.X} y={_longScan.Value.Y}, {_longScan.Value.Values.Length} sub-pixels, {lobes.Count} bright lobes, gaps {string.Join(",", gaps)}");
+        if (pitch == null) { lines.Add("   no repeating gap pattern: the pitch cannot be read (need at least 3 repeats and a clean scan)"); _lensText = string.Join("\n", lines); return; }
+        var (pn, pd) = pitch.Value;
+        lines.Add($"   pitch = {pn}/{pd} = {(double)pn / pd:0.0000} sub-pixels per lens");
+
+        if (_downScans.Count < 4) { lines.Add("2. slant: scan the same window on at least 4 consecutive rows (Scan the window on each row) to measure it."); _lensText = string.Join("\n", lines); return; }
+        var rows = _downScans.Select(r => (IReadOnlyList<double>)r.Values).ToList();
+        var (sn, sd, spread) = LensLattice.FitSlant(pn, pd, rows, 3 * (_downScanX + _originX), _downScans[0].Y + _originY);
+        lines.Add($"2. slant = {sn}/{sd} = {(double)sn / sd:0.000} sub-pixels per row (phase spread over {rows.Count} rows {spread:0.000} cycles)");
+
+        if (_acrossProfiles.Count < 8) { lines.Add("3. phase sweep: scan at least 8 windows across the panel (Scan windows across the panel, 18 windows 40 px apart is good)."); _lensText = string.Join("\n", lines); return; }
+        var flat = new LensModel(pn, pd, sn, sd, 0);
+        var xs = new List<double>(); var phases = new List<double>(); double corrSum = 0;
+        foreach (var (x, profile) in _acrossProfiles)
+        {
+            var (phase, corr) = LensLattice.WindowPhase(flat, profile, 3 * (x + _originX), _acrossY + _originY);
+            xs.Add(x + _originX + _acrossPixels / 2.0); phases.Add(phase); corrSum += corr;
+        }
+        double meanCorr = corrSum / _acrossProfiles.Count;
+        var unwrapped = ViewCurveFit.Unwrap(phases);
+        lines.Add($"3. phase sweep: {_acrossProfiles.Count} windows, mean correlation with the lens {meanCorr:0.000}" + (meanCorr < 0.85 ? "  (LOW: the lens does not explain these windows)" : ""));
+        lines.Add("   column -> unwrapped phase: " + string.Join("  ", xs.Select((x, i) => $"{x:0}:{unwrapped[i]:0.000}")));
+        double pitchMm = _project.PixelPitchXmm > 0 ? _project.PixelPitchXmm : 475.0 / 1680;
+        var fit = ViewCurveFit.Fit(xs, unwrapped, pitchMm, _distanceHintMm, 40);
+        if (fit == null) { lines.Add("   curve fit failed"); _lensText = string.Join("\n", lines); return; }
+        lines.Add($"   curve: camera distance {fit.DistanceMm:0} mm, straight ahead of column {fit.FootX:0}, zone {fit.ZoneDegrees:0.0} degrees, residual {fit.ResidualCycles:0.0000} cycles");
+        double center = fit.CenterPhase - Math.Floor(fit.CenterPhase);
+        lines.Add($"   lens centre phase {center:0.000} (moves about 0.075 per 10 mm of camera distance: measure the distance to pin it; hint {_distanceHintMm:0} mm)");
+
+        var lens = new LensModel(pn, pd, sn, sd, center);
+        var tile = lens.ToTile(_viewCount);
+        var counts = new int[_viewCount];
+        foreach (var v in tile.Views) counts[v]++;
+        lines.Add($"4. pattern: {tile.Cols} columns x {tile.Rows} rows, {_viewCount} views, views own {string.Join("/", counts)} sub-pixels of {tile.Views.Length}");
+        _iniText = PixelPatternExporter.ToIni(tile, string.IsNullOrWhiteSpace(_project.DisplayName) ? "Scanned display" : _project.DisplayName);
+        _lensText = string.Join("\n", lines);
     }
 
     // BODY ARC: the head holds its world orientation while the body turns, so the camera swings sideways along an arc (a large
@@ -666,6 +794,8 @@
     Task ScanDownAsync() => RunRobotAsync(async () =>
     {
         var keep = _subY;
+        _downScans.Clear();
+        _downScanX = _downX;
         var lines = new List<string> { $"x={_downX}, {_acrossPixels} pixels ({_acrossPixels * 3} sub-pixels R,G,B), values in hundreds" };
         foreach (var token in _downYList.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
@@ -673,7 +803,9 @@
             _subY = y;
             var profile = await DoRowScanAsync(_downX, _acrossPixels);
             if (profile == null) { lines.Add($"y={y}: scan failed"); break; }
-            lines.Add($"y={y,4}  " + string.Join(" ", profile.Select(v => double.IsNaN(v) ? "  ?" : ((int)Math.Round(v / 100)).ToString().PadLeft(3))));
+            _downScans.Add((y, profile));
+            SaveScans();
+            lines.Add($"y={y,4}  "+ string.Join(" ", profile.Select(v => double.IsNaN(v) ? "  ?" : ((int)Math.Round(v / 100)).ToString().PadLeft(3))));
             _downText = string.Join("\n", lines);
             StateHasChanged();
         }
