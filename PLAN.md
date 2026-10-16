@@ -356,3 +356,23 @@ Offline numbers from the earlier scans: distance 150, column 740, centre 0.23.
 Not verified: the absolute numbering. The centre phase is good to about +-0.04 (a third of an 8-view bin) and moves 0.075 per 10 mm
 of camera distance, so measuring that distance pins it; and which way view 0 faces needs one look in the renderer (reverse=1
 flips it).
+
+## Resume here (written 2026-10-15 evening)
+
+State: the lens of the Philips 22 is solved and the app builds the pattern (`samples/Philips-22-3D2N11-00.ini`, 42 x 28, 8 views).
+Robot parked (motors off). Stimulus window 99cdf691 may still be open on the Philips (the app lists live windows; Close the target
+window closes it). Test server for the published build: `scratchpad/pub` served by `serve.mjs` on :5271 (rebuild with
+`dotnet publish -c Release -o <dir>` in `Lenticulous/Lenticulous`).
+
+1. TJ tries the ini in his renderer. Left/right swapped -> `reverse=1`. Views offset (3D looks shifted) -> change the lens centre
+   phase (0.218) and regenerate; it moves 0.075 per 10 mm of camera distance, so MEASURE the camera-to-glass distance (ruler) and
+   enter it as the distance hint in the Lens solution panel.
+2. Verify without TJ's renderer: draw one view lit (all sub-pixels of that view) in the stimulus window and check the camera
+   sees it at the columns the phase curve predicts (needs a canvas command in Stimulus.razor).
+3. Make the scan one button: calibrate, long window, 8 rows, 17 across windows, solve (today each is a separate click).
+4. Rule 4: frames still cross into .NET as byte arrays (CaptureAveragedAsync / SampleLuma are EXPERIMENT paths); move the capture
+   and region sums to WebGPU. QR decode copy also flagged.
+5. Other displays: only the Philips is solved. Run the same scans on another lenticular display (the code takes any rational pitch
+   and slant); the long window needs 3+ repeats of the gap pattern (30 pixels was plenty for 14/3).
+6. Origin: a windowed stimulus popup has an unknown panel origin; the fullscreen window reports (0, 56). Keep scans in one window
+   state and set Window origin X/Y in the Lens solution panel.
