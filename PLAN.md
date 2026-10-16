@@ -324,3 +324,22 @@ Calibration at this range has strong perspective (one stimulus pixel is about 1.
 
 Open: the response model (brightness vs phase of the sub-pixel inside the lens and the angle), the row dependence (slant: scan
 other rows), turning phase into view numbers, and the tile/export.
+
+## Solved: the lens of the Philips 22-3D2N11/00 (2026-10-15)
+
+- **Pitch**: a long contiguous scan (30 pixels = 90 sub-pixels, x=200..229, y=440) has its bright sub-pixels at 1, 5, 10, 15, 19,
+  24, 29, 33, 38, 43, 47, 52, 57, 61, 66, 71, 75, 80, 85: spacings 4, 5, 5 repeating six times. Three lenses span exactly 14
+  sub-pixels: P = 14/3. (Short windows cannot tell 4.6 from 4.75; the exact integer spacing pattern can.)
+- **Slant**: 8 consecutive rows at x=520 keep the same phase to within 0.03 cycles once the bright set is moved by r/2: one
+  sub-pixel per two rows (0.505 measured).
+- **Lens phase** of a sub-pixel: `u(s, r) = ((s - r/2) / (14/3)) mod 1`, s = 3 * pixel x + channel (R=0, G=1, B=2), r = panel row
+  (stimulus row + 56, the origin of the fullscreen window). 28 distinct classes; rectangular tile 42 columns x 28 rows.
+- **Check**: 61 scanned windows (7 camera poses, rows, the long window) fit with mean correlation 0.945 with one free phase per
+  window.
+- **Angle**: with the exact period the phase the camera sees is a smooth monotonic function of the panel column: 2.13 cycles from
+  x=240 to x=880. A fit `phase = p0 - K atan((xf - x) pitch / d)` has residual 0.008 cycles and gives distance about 150 mm, the
+  point in front of the camera at x about 740, one zone about 27 degrees, and a lens-centre phase of about 0.23 (it moves 0.075
+  per 10 mm of distance: the distance needs measuring to pin the view numbering).
+- **Optics**: the lens inverts the picture: the sub-pixel seen moves to a lower phase when the camera moves right.
+- **What did not work**: camera pose from the calibration homography (unreliable for small moves); body-yaw arc (the camera
+  rotates, it hardly translates); head Y gives about 0.45 mm sideways per mm.

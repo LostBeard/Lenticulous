@@ -148,6 +148,27 @@
         <button @onclick="CalibrateAsync" disabled="@_busy">Calibrate (9 white patches)</button>
         <button @onclick="LocateSubPixelsAsync" disabled="@_busy">Locate R, G, B sub-pixels of this pixel</button>
         <button @onclick="ScanRowAsync" disabled="@_busy">Scan a row of 8 pixels from here</button>
+        <div class="form">
+            <label>Down-the-panel rows (y, comma separated) <input type="text" @bind="_downYList" /></label>
+            <label>Window x <input type="number" @bind="_downX" /></label>
+            <label>Pixels per window <input type="number" @bind="_acrossPixels" /></label>
+            <label>Across: first x <input type="number" @bind="_acrossX0" /></label>
+            <label>Across: step (px) <input type="number" @bind="_acrossStep" /></label>
+            <label>Across: windows <input type="number" @bind="_acrossCount" /></label>
+        </div>
+        <button @onclick="ScanDownAsync" disabled="@_busy">Scan the window on each row (no movement)</button>
+        @if (_downText != "")
+        {
+            <pre>@_downText</pre>
+        }
+        <div class="form">
+            <label>Body yaws (deg, comma separated) <input type="text" @bind="_bodyYawList" /></label>
+        </div>
+        <button @onclick="ScanBodyYawsAsync" disabled="@_busy">At each body yaw: calibrate and scan the across windows (moves the robot)</button>
+        @if (_bodyText != "")
+        {
+            <pre>@_bodyText</pre>
+        }
         <button @onclick="ScanAcrossAsync" disabled="@_busy">Scan windows across the panel (no movement)</button>
         @if (_acrossText != "")
         {
@@ -590,7 +611,9 @@
     int _acrossX0 = 240, _acrossStep = 40, _acrossCount = 18, _acrossPixels = 6;
     string _acrossText = "";
     readonly List<(int X, double[] Profile)> _acrossProfiles = new();
-    Task ScanAcrossAsync() => RunRobotAsync(async () =>
+    Task ScanAcrossAsync() => RunRobotAsync(DoAcrossAsync);
+
+    async Task DoAcrossAsync()
     {
         _acrossProfiles.Clear();
         var lines = new List<string> { $"row y={_subY}: windows of {_acrossPixels} pixels ({_acrossPixels * 3} sub-pixels R,G,B) every {_acrossStep} px from x={_acrossX0}; values in hundreds, '#' = over 40% of the window's brightest" };
@@ -607,6 +630,55 @@
             StateHasChanged();
         }
         _acrossText = string.Join("\n", lines);
+    }
+
+    // BODY ARC: the head holds its world orientation while the body turns, so the camera swings sideways along an arc (a large
+    // lateral move with the same viewing direction). At each body yaw: calibrate, then scan the across windows; everything is logged.
+    string _bodyYawList = "-20,-10,0,10,20";
+    string _bodyText = "";
+    Task ScanBodyYawsAsync() => RunRobotAsync(async () =>
+    {
+        var log = new List<string>();
+        foreach (var token in _bodyYawList.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (!double.TryParse(token, System.Globalization.CultureInfo.InvariantCulture, out var yaw)) continue;
+            _bodyText = string.Join("\n", log) + $"\n== body yaw {yaw}: turning...";
+            StateHasChanged();
+            await Robot.TurnAsync(_robotAddress, yaw, 0);
+            var pose = await Robot.PoseTextAsync(_robotAddress);
+            var ok = await DoCalibrateAsync(new[] { 200, 520, 840 }, new[] { 400, 560, 720 });
+            log.Add($"== body yaw {yaw}: {pose}");
+            log.Add(_calibText);
+            if (!ok) { log.Add("calibration failed"); _bodyText = string.Join("\n", log); continue; }
+            await DoAcrossAsync();
+            log.Add(_acrossText);
+            _bodyText = string.Join("\n", log);
+            StateHasChanged();
+        }
+        _bodyText = string.Join("\n", log);
+    });
+
+    // DOWN THE PANEL: the same window of pixels on several rows. A slanted lens shifts the bright set from row to row; how far per row
+    // is the slant.
+    int _downX = 520;
+    string _downYList = "440,441,442,443,444,445,446,447";
+    string _downText = "";
+    Task ScanDownAsync() => RunRobotAsync(async () =>
+    {
+        var keep = _subY;
+        var lines = new List<string> { $"x={_downX}, {_acrossPixels} pixels ({_acrossPixels * 3} sub-pixels R,G,B), values in hundreds" };
+        foreach (var token in _downYList.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (!int.TryParse(token, out var y)) continue;
+            _subY = y;
+            var profile = await DoRowScanAsync(_downX, _acrossPixels);
+            if (profile == null) { lines.Add($"y={y}: scan failed"); break; }
+            lines.Add($"y={y,4}  " + string.Join(" ", profile.Select(v => double.IsNaN(v) ? "  ?" : ((int)Math.Round(v / 100)).ToString().PadLeft(3))));
+            _downText = string.Join("\n", lines);
+            StateHasChanged();
+        }
+        _subY = keep;
+        _downText = string.Join("\n", lines);
     });
 
     // SEVERAL CAMERA POSITIONS: for each head Y (mm) in the list the head moves, a local calibration (9 patches around the row)
