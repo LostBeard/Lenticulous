@@ -303,3 +303,24 @@ waits. After the marker is read a 120 ms settle covers the camera exposing acros
 Caveat found on the way: the pixel profile depends on the stimulus window's origin on the panel (a new windowed popup read a
 different profile from the fullscreen window), so scans are only comparable inside one window state; the origin has to be fixed
 (fullscreen) and recorded with every scan.
+
+## Measured: one still picture covers the view fan when the camera is close (2026-10-15)
+
+With the camera about 7 inches (18 cm) from the screen (TJ moved Reachy closer), the panel columns in the picture are seen at very
+different angles, far more than the lens fan. So no camera movement is needed: short windows of sub-pixels scanned at spaced
+columns along one row each see a different part of the fan. Row y=440, 18 windows of 6 pixels (18 sub-pixels, R G B each) every
+40 px from x=240 to x=880, robot still, about 9 minutes with the sync marker.
+
+- The bright sub-pixels repeat with a lens pitch of about 4.64 sub-pixels (4.60 to 4.70 fit equally well; 14/3 = 4.667 fits).
+- Inside every window the bright set is tightly aligned to that period (phase coherence 0.91 to 1.0).
+- From window to window the phase of the bright set advances about 0.25 to 0.3 of a period per 40 px: that is the angle sweeping
+  across the view fan.
+
+Example windows, values in hundreds, sub-pixels 0..17 of the window starting at x: x=240: `7 11 37 14 7 3 16 97 4 7 8 14 59 10 1 9 71 27`;
+x=400: `104 22 5 5 50 100 10 7 10 83 77 7 5 34 94 17 10 5`; x=800: `13 102 64 13 12 10 130 40 7 11 35 105 20 10 6 92 110 9`.
+
+Calibration at this range has strong perspective (one stimulus pixel is about 1.0 camera px at the left and 1.3 at the right), RMS
+0.78 camera px, and the stimulus window opens fullscreen with its origin at (0, 56).
+
+Open: the response model (brightness vs phase of the sub-pixel inside the lens and the angle), the row dependence (slant: scan
+other rows), turning phase into view numbers, and the tile/export.
